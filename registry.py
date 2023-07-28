@@ -1,81 +1,83 @@
 import gzip
+import json
 import os
 import re
-from typing import Optional
-import requests
-import requests.auth
-import urllib3
+from typing import BinaryIO, Mapping, Optional
 from layer import Layer, setup_uidgidmap
+import urllib.request
+import urllib.parse
 
 import linux
 from untar import untar
 
-class BearerAuthError(Exception):
-    pass
-
 class PullError(Exception):
     pass
 
-class BearerAuth(requests.auth.AuthBase):
+class BearerHandler(urllib.request.BaseHandler):
     token: str
+    authorizing: bool
 
-    def __init__(self, token: Optional[str] = None):
+    def __init__(self, *, token: Optional[str] = None) -> None:
+        super().__init__()
+
+        self.authorizing = False
         self.token = token
     
-    def __call__(self, r: requests.PreparedRequest):
-        if self.token is not None:
-            r.headers["authorization"] = f"Bearer {self.token}"
-        r.register_hook("response", self.handle_response)
-
-        return r
+    def http_request(self, req: urllib.request.Request):
+        if self.token is not None and req.get_header("authorization") is not None:
+            req.add_header("authorization", f"Bearer {self.token}")
+        
+        return req
     
-    def handle_response(self, r: requests.Response, **kwargs):
-        if r.status_code == 401:
+    def http_error_401(self, req: urllib.request.Request, fp: BinaryIO, code: int, msg: str, hdrs: Mapping[str, str]):
+        if self.authorizing:
+            # Do not authorize if this handler is already busy (e.g., when called recursively)
+            return None
+
+        try:
+            self.authorizing = True
+
             # Parse the authentication header
             pat = lambda name: f"{name}=\"(?P<{name}>[^\"]+)\",?"
-            m: Optional[re.Match] = re.fullmatch(f"Bearer ({pat('realm')}|{pat('service')}|{pat('scope')})+", r.headers["www-authenticate"])
+            m: Optional[re.Match] = re.fullmatch(f"Bearer ({pat('realm')}|{pat('service')}|{pat('scope')})+", hdrs["www-authenticate"])
             if m:
                 auth = m.groupdict()
             else:
-                raise BearerAuthError(f"Could not parse www-authenticate header: {r.headers['www-authenticate']}")
+                return None
+            
+            # Get the token
+            realm = auth.pop('realm')
+            qs = urllib.parse.urlencode(auth)
+            authreq = urllib.request.Request(f"{realm}?{qs}")
+            with self.parent.open(authreq) as authresp:
+                self.token = json.load(authresp)['token']
+            
+            # Redo the request with the authorization header
+            req.add_header("authorization", f"Bearer {self.token}")
+            return self.parent.open(req)
+        finally:
+            self.authorizing = False
 
-            # Obtain a token from whatever URL is indicated in the realm
-            authresponse = requests.get(auth['realm'], {'service': auth['service'], 'scope': auth['scope']})
-            authresponse.raise_for_status()
-
-            # Store the token in the object for future usage
-            self.token = authresponse.json()["token"]
-
-            # Redo the request with the authorization header and without this hook (in case it again returns 401)
-            r2 = r.request.copy()
-            r2.headers["authorization"] = f"Bearer {self.token}"
-            r2.deregister_hook("response", self.handle_response)
-            return requests.Session().send(r2)
-
-def pull(url: str, *, auth: Optional[BearerAuth] = None):
-    if auth is None:
-        auth = BearerAuth()
-    
+def pull(url: str):
     (url, rest) = url.split("/", 1)
     (name, reference) = rest.split(":", 1)
 
-    # First get a list of manifests to find the one belonging to this architecture
-    print("Retrieving list of manifests...")
-    r = requests.get(f"https://{url}/v2/{name}/manifests/{reference}",
-                        auth=auth,
-                        headers={"accept": "application/vnd.docker.distribution.manifest.list.v2+json"})
-    r.raise_for_status()
-    manifest_list = r.json()
+    opener = urllib.request.build_opener(BearerHandler)
+
+    print("Retrieving available manifests...")
+    req = urllib.request.Request(f"https://{url}/v2/{name}/manifests/{reference}",
+                                 headers={"accept": "application/vnd.docker.distribution.manifest.list.v2+json"})
+    with opener.open(req) as resp:
+        manifest_list = json.load(resp)
 
     # Find the manifest belonging to this architecture
     for manifest in manifest_list['manifests']:
         if manifest['platform']['architecture'] == linux.ARCH and manifest['platform'].get('variant', linux.VARIANT) == linux.VARIANT and manifest['platform']['os'] == linux.OS:
             print("Retrieving manifest...")
-            r = requests.get(f"https://{url}/v2/{name}/manifests/{manifest['digest']}",
-                                auth=auth,
-                                headers={"accept": manifest['mediaType']})
-            r.raise_for_status()
-            manifest = r.json()
+            req = urllib.request.Request(f"https://{url}/v2/{name}/manifests/{manifest['digest']}",
+                                         headers={"accept": manifest['mediaType']})
+            with opener.open(req) as resp:
+                manifest = json.load(resp)
             break
     else:
         archlist = [manifest['platform']['architecture'] + manifest['platform'].get('variant', '') for manifest in manifest_list['manifests']]
@@ -86,11 +88,10 @@ def pull(url: str, *, auth: Optional[BearerAuth] = None):
     # configuration for all layers as a whole. Hence, we pull the configuration
     # and put that on the *last* layer.
     print("Retrieving configuration...")
-    r = requests.get(f"https://{url}/v2/{name}/blobs/{manifest['config']['digest']}",
-                     auth=auth,
-                     headers={"accept": manifest['config']['mediaType']})
-    r.raise_for_status()
-    configuration = r.json()
+    req = urllib.request.Request(f"https://{url}/v2/{name}/blobs/{manifest['config']['digest']}",
+                                 headers={"accept": manifest['config']['mediaType']})
+    with opener.open(req) as resp:
+        configuration = json.load(resp)
 
     # Execute the pull in a user namespace
     r1, w1 = os.pipe()
@@ -111,16 +112,13 @@ def pull(url: str, *, auth: Optional[BearerAuth] = None):
             print(f"Pulling {layer['digest']}...", flush=True)
             l = Layer(layer['digest'].split(':', 1)[-1])
             l.write()
-            with requests.get(f"https://{url}/v2/{name}/blobs/{layer['digest']}",
-                            auth=auth,
-                            headers={"accept": layer["mediaType"]},
-                            stream=True) as r:
-                r.raise_for_status()
-                fp: urllib3.response.HTTPResponse = r.raw
-                fp.decode_content = True
+            req = urllib.request.Request(f"https://{url}/v2/{name}/blobs/{layer['digest']}",
+                                         headers={"accept": layer['mediaType']})
+            with opener.open(req) as resp:
                 if "gzip" in layer["mediaType"]:
-                    fp = gzip.GzipFile(fileobj=fp, mode='rb')
-                for file in untar(fp):
+                    resp = gzip.GzipFile(fileobj=resp, mode='rb')
+                for file in untar(resp):
+                    print(file)
                     basename = os.path.basename(file.path)
                     if basename.startswith(".wh."):
                         if basename == ".wh..wh..opq":
@@ -141,7 +139,7 @@ def pull(url: str, *, auth: Optional[BearerAuth] = None):
 
     setup_uidgidmap(pid)
 
-    # Signal child to unshare by closing the pipe
+    # Signal child it can continue by closing the pipe
     os.close(w2)
     os.close(r2)
 
