@@ -1,5 +1,7 @@
 import os
+import pwd
 import shlex
+import shutil
 import signal
 import sys
 from typing import Dict, List, NoReturn, Optional
@@ -9,8 +11,45 @@ import termios
 
 LAYERPATH = "/home/ubuntu/layers"
 
+def setup_uidgidmap(pid: int):
+    uid = os.geteuid()
+    gid = os.getegid()
+    user = pwd.getpwuid(uid)
+
+    # Find the allowed ranged for the current user
+    retuid = -1
+    with open("/etc/subuid", "r") as f:
+        for line in f:
+            uidorname, subuid, subuidcount = line.split(":")
+            if uidorname == user[0] or uidorname == str(uid):
+                retuid = os.system(f"newuidmap {pid} 0 {uid} 1 1 {subuid} {subuidcount}")
+                break
+    
+    retgid = -1
+    with open("/etc/subgid", "r") as f:
+        for line in f:
+            uidorname, subgid, subgidcount = line.split(":")
+            if uidorname == user[0] or uidorname == str(uid):
+                retgid = os.system(f"newgidmap {pid} 0 {gid} 1 1 {subgid} {subgidcount}")
+
+    if retuid != 0:
+        # newuidmap failed, set it up ourselves
+        f = os.open(f"/proc/{pid}/uid_map", os.O_WRONLY)
+        os.write(f, ("%8u %8u %8u\n" % (0, uid, 1)).encode())
+        os.close(f)
+
+    if retgid != 0:
+        # newgidmap failed, set it up ourselves
+        f = os.open(f"/proc/{pid}/setgroups", os.O_WRONLY)
+        os.write(f, "deny".encode())
+        os.close(f)
+
+        f = os.open(f"/proc/{pid}/gid_map", os.O_WRONLY)
+        os.write(f, ("%8u %8u %8u\n" % (0, gid, 1)).encode())
+        os.close(f)
+
 class Layer:
-    location: str
+    path: str
     parent: Optional["Layer"]
     config: Dict
 
@@ -36,7 +75,7 @@ class Layer:
         if value is not None:
             return value
         else:
-            return os.path.basename(self.location)
+            return os.path.basename(self.path)
     
     @property
     def domainname(self) -> str:
@@ -48,13 +87,15 @@ class Layer:
     
     @property
     def pidfile(self) -> str:
-        return os.path.join(self.location, "init.pid")
+        return os.path.join(self.path, "init.pid")
 
     def overlay(self) -> List[str]:
+        """Get all layers needed to build a namespace with this layer as top layer."""
+
         if self.parent is not None:
-            return [os.path.join(self.location, "root")] + self.parent.overlay()
+            return [os.path.join(self.path, "root")] + self.parent.overlay()
         else:
-            return [os.path.join(self.location, "root")]
+            return [os.path.join(self.path, "root")]
     
     def __getitem__(self, key: str) -> Dict | str | None:
         """Return an effective configuration value of this layer. Effective
@@ -82,33 +123,47 @@ class Layer:
             return None
     
     def write(self):
-        for which in ("merged", "root", "work"):
-            os.makedirs(os.path.join(self.location, which), exist_ok=True)
-        if os.path.exists(os.path.join(self.location, "parent")):
-            os.remove(os.path.join(self.location, "parent"))
-        if self.parent is not None:
-            os.symlink(self.parent.location, os.path.join(self.location, "parent"))
-        if os.path.exists(os.path.join(self.location, "config.ini")):
-            os.remove(os.path.join(self.location, "config.ini"))
-        if len(self.config.keys()) > 0:
-            write_config(os.path.join(self.location, "config.ini"), self.config)
+        """Write this layer to disk. It will overwrite any configuration or
+        directories that are already present, but will not change anything in
+        the root file system."""
 
-    def __init__(self, location: str):
-        self.location = os.path.join(LAYERPATH, location)
+        for which in ("merged", "root", "work"):
+            os.makedirs(os.path.join(self.path, which), exist_ok=True)
+        if os.path.exists(os.path.join(self.path, "parent")):
+            os.remove(os.path.join(self.path, "parent"))
+        if self.parent is not None:
+            os.symlink(self.parent.path, os.path.join(self.path, "parent"))
+        if os.path.exists(os.path.join(self.path, "config.ini")):
+            os.remove(os.path.join(self.path, "config.ini"))
+        if len(self.config.keys()) > 0:
+            write_config(os.path.join(self.path, "config.ini"), self.config)
+    
+    def remove(self):
+        """Remove the layer from disk. It can be rewritten with a call to
+        write."""
+    
+        try:
+            shutil.rmtree(self.path)
+        except FileNotFoundError:
+            # If the tree does not exist, we also do not have to remove it
+            pass
+
+    def __init__(self, path: str):
+        self.path = os.path.join(LAYERPATH, path)
         self.parent = None
         self.config = {}
 
-        if os.path.exists(os.path.join(self.location, "parent")):
-            parentpath = os.path.realpath(os.path.join(self.location, "parent"))
+        if os.path.exists(os.path.join(self.path, "parent")):
+            parentpath = os.path.realpath(os.path.join(self.path, "parent"))
             self.parent = Layer(parentpath)
 
-        if os.path.exists(os.path.join(self.location, "config.ini")):
-            self.config = load_config(os.path.join(self.location, "config.ini"))
+        if os.path.exists(os.path.join(self.path, "config.ini")):
+            self.config = load_config(os.path.join(self.path, "config.ini"))
     
     def start(self) -> NoReturn:
         # Before doing anything, see whether location exists and there is no pidfile
-        if not os.path.exists(self.location):
-            raise FileNotFoundError(f"{self.location}")
+        if not os.path.exists(self.path):
+            raise FileNotFoundError(f"{self.path}")
         if os.path.exists(self.pidfile):
             raise FileExistsError(f"{self.pidfile}")
 
@@ -116,68 +171,36 @@ class Layer:
             linux.CLONE_NEWIPC | linux.CLONE_NEWUSER | linux.CLONE_NEWPID | \
             linux.CLONE_NEWNET | linux.CLONE_NEWTIME
 
-        uid = os.geteuid()
-        gid = os.getegid()
-
-        r1, w1 = os.pipe()
-        r2, w2 = os.pipe()
-        pid = os.getpid()
+        r, w = os.pipe()
         if os.fork() == 0:
+            os.close(w)
+
             # Wait for the parent to unshare
-            _ = os.read(r1, 1)
+            _ = os.read(r, 1)
 
-            # Set the uid/gid maps for the parent
-            ret1 = os.system(f"newuidmap {pid} 0 {uid} 1 1 100000 65536")
-            ret2 = os.system(f"newgidmap {pid} 0 {gid} 1 1 100000 65536")
+            setup_uidgidmap(os.getppid())
             
-            # Signal the parent whether the calls succeeded
-            ret = (0 if ret1 == 0 else 1) | (0 if ret2 == 0 else 2)
-            os.write(w2, ret.to_bytes(length=1, byteorder='big'))
-
-            sys.exit(0)
+            os._exit(0)
         else:
-            # Close unneeded pipes
-            os.close(w2)
-            os.close(r1)
+            os.close(r)
 
         linux.unshare(flags)
 
-        # Signal the child that we have unshared
-        os.write(w1, b"\0")
-
-        # Wait for the child to signal back that we can continue
-        ret = os.read(r2, 1)
-
-        os.close(r2)
-        os.close(w1)
-
-        if ret[0] & 1:
-            # newuidmap failed, set it up ourselves
-            f = os.open("/proc/self/uid_map", os.O_WRONLY)
-            os.write(f, ("%8u %8u %8u\n" % (0, uid, 1)).encode())
-            os.close(f)
-
-        if ret[0] & 2:
-            # newgidmap failed, set it up ourselves
-            f = os.open("/proc/self/setgroups", os.O_WRONLY)
-            os.write(f, "deny".encode())
-            os.close(f)
-
-            f = os.open("/proc/self/gid_map", os.O_WRONLY)
-            os.write(f, ("%8u %8u %8u\n" % (0, gid, 1)).encode())
-            os.close(f)
+        # Signal child that we have unshared by closing the pipe
+        os.close(w)
+        os.wait()
 
         # Forking is required to get a process with PID 1 in place. The parent
         # stays alive to record the pid in the parent namespace in a pid file.
         # Before forking, open the directory where the pid file must be written
         # (since the child will modify mounts) and record all terminal
         # attributes (since the child may modify those)
-        dir_fd = os.open(self.location, os.O_DIRECTORY)
+        dir_fd = os.open(self.path, os.O_DIRECTORY)
         attr = termios.tcgetattr(sys.stdin.fileno())
         pid = os.fork()
         if pid > 0:
             # Create a pid file
-            f = os.open("init.pid", os.O_CREAT | os.O_WRONLY, dir_fd = dir_fd)
+            f = os.open("init.pid", os.O_CREAT | os.O_WRONLY, dir_fd=dir_fd)
             os.write(f, f"{pid}\n".encode())
             os.close(f)
 
@@ -186,7 +209,7 @@ class Layer:
 
                 if os.WIFEXITED(status) or os.WIFSIGNALED(status):
                     # Remove the pid file
-                    os.remove("init.pid", dir_fd = dir_fd)
+                    os.remove("init.pid", dir_fd=dir_fd)
 
                     # Restore the terminal to its original state; this will
                     # send SIGTTOU since this is a background process, which
@@ -208,16 +231,16 @@ class Layer:
         overlay = self.overlay()
         if len(overlay) > 1:
             linux.mount("none",
-                        os.path.join(self.location, "merged"),
+                        os.path.join(self.path, "merged"),
                         "overlay",
                         0,
-                        f"lowerdir={':'.join(overlay[1:])},upperdir={overlay[0]},workdir={os.path.join(self.location, 'work')},userxattr")
+                        f"lowerdir={':'.join(overlay[1:])},upperdir={overlay[0]},workdir={os.path.join(self.path, 'work')},userxattr")
         else:
-            linux.mount(overlay[0], os.path.join(self.location, "merged"), "ignored", linux.MS_BIND, None)
+            linux.mount(overlay[0], os.path.join(self.path, "merged"), "ignored", linux.MS_BIND, None)
         
-        os.mkdir(os.path.join(self.location, "merged", old_root))
+        os.mkdir(os.path.join(self.path, "merged", old_root))
         try:
-            linux.pivot_root(os.path.join(self.location, "merged"), os.path.join(self.location, "merged", old_root))
+            linux.pivot_root(os.path.join(self.path, "merged"), os.path.join(self.path, "merged", old_root))
             try:
                 os.chdir("/")
 
