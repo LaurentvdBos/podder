@@ -56,6 +56,9 @@ if platform.machine() == "aarch64":
     __NR_UNSHARE = 97
     __NR_SETHOSTNAME = 161
     __NR_SETDOMAINNAME = 162
+    ARCH = "arm64"
+    OS = "linux"
+    VARIANT = "v8"
 else:
     raise NotImplementedError("Platform %s not supported" % platform.machine())
 
