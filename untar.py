@@ -37,12 +37,9 @@ class TarFile:
     def __repr__(self) -> str:
         return "<TarFile %o %c %s %d %d %s (%d bytes)>" % (self.mode, self.type, self.path, self.uid, self.gid, str(datetime.fromtimestamp(self.mtime)), self.size)
     
-    def write(self, path: str, *, overwrite: bool = False):
+    def write(self, path: str):
         if os.path.exists(os.path.join(path, self.path)) or os.path.islink(os.path.join(path, self.path)):
-            if not overwrite:
-                raise FileExistsError(self.path)
-            if not os.path.isdir(os.path.join(path, self.path)) or os.path.islink(os.path.join(path, self.path)):
-                os.remove(os.path.join(path, self.path))
+            raise FileExistsError(self.path)
 
         dir_fd = os.open(path, os.O_DIRECTORY)
         try:
@@ -67,10 +64,7 @@ class TarFile:
                     os.mknod(self.path, self.mode | stat.S_IFBLK, os.makedev(self.major, self.minor), dir_fd=dir_fd)
                 
                 case '5':
-                    if os.path.exists(os.path.join(path, self.path)):
-                        os.chmod(self.path, self.mode, dir_fd=dir_fd)
-                    else:
-                        os.mkdir(self.path, self.mode, dir_fd=dir_fd)
+                    os.mkdir(self.path, self.mode, dir_fd=dir_fd)
                 
                 case _:
                     raise NotImplementedError(f"File type {self.type} unknown")

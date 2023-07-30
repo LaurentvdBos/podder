@@ -1,7 +1,6 @@
 import os
 import pwd
 import shlex
-import shutil
 import signal
 import sys
 from typing import Dict, List, NoReturn, Optional
@@ -137,20 +136,10 @@ class Layer:
             os.remove(os.path.join(self.path, "config.ini"))
         if len(self.config.keys()) > 0:
             write_config(os.path.join(self.path, "config.ini"), self.config)
-    
-    def remove(self):
-        """Remove the layer from disk. It can be rewritten with a call to
-        write."""
-    
-        try:
-            shutil.rmtree(self.path)
-        except FileNotFoundError:
-            # If the tree does not exist, we also do not have to remove it
-            pass
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, *, parent: Optional["Layer"] = None):
         self.path = os.path.join(LAYERPATH, path)
-        self.parent = None
+        self.parent = parent
         self.config = {}
 
         if os.path.exists(os.path.join(self.path, "parent")):
@@ -287,5 +276,5 @@ class Layer:
         os.execvpe(self.cmd[0], self.cmd, self.env)
 
 if __name__ == "__main__":
-    layer = Layer("slbash2")
+    layer = Layer("ubuntu")
     layer.start()
