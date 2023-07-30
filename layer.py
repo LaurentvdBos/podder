@@ -128,7 +128,7 @@ class Layer:
 
         for which in ("merged", "root", "work"):
             os.makedirs(os.path.join(self.path, which), exist_ok=True)
-        if os.path.exists(os.path.join(self.path, "parent")):
+        if os.path.islink(os.path.join(self.path, "parent")):
             os.remove(os.path.join(self.path, "parent"))
         if self.parent is not None:
             os.symlink(self.parent.path, os.path.join(self.path, "parent"))
