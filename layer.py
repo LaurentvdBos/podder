@@ -85,6 +85,10 @@ class Layer:
             return "(none)"
     
     @property
+    def ephemeral(self) -> bool:
+        return bool(self["ephemeral"])
+    
+    @property
     def pidfile(self) -> str:
         return os.path.join(self.path, "init.pid")
 
@@ -126,7 +130,7 @@ class Layer:
         directories that are already present, but will not change anything in
         the root file system."""
 
-        for which in ("merged", "root", "work"):
+        for which in ("merged", "root", "tmpdir"):
             os.makedirs(os.path.join(self.path, which), exist_ok=True)
         if os.path.islink(os.path.join(self.path, "parent")):
             os.remove(os.path.join(self.path, "parent"))
@@ -217,15 +221,19 @@ class Layer:
 
         old_root = "old_root"
 
+        # Build up the layers using an overlayfs. All the changeable folders of
+        # the overlayfs are put in a tmpfs, which is destroyed whenever the
+        # mount namespace ceases to exist.
+        # FIXME: should be done based on "ephemeral" configuration
         overlay = self.overlay()
-        if len(overlay) > 1:
-            linux.mount("none",
-                        os.path.join(self.path, "merged"),
-                        "overlay",
-                        0,
-                        f"lowerdir={':'.join(overlay[1:])},upperdir={overlay[0]},workdir={os.path.join(self.path, 'work')},userxattr")
-        else:
-            linux.mount(overlay[0], os.path.join(self.path, "merged"), "ignored", linux.MS_BIND, None)
+        linux.mount("none", os.path.join(self.path, "tmpdir"), "tmpfs", 0, None)
+        os.mkdir(os.path.join(self.path, "tmpdir", "work"))
+        os.mkdir(os.path.join(self.path, "tmpdir", "upper"))
+        linux.mount("none",
+                    os.path.join(self.path, "merged"),
+                    "overlay",
+                    0,
+                    f"lowerdir={':'.join(overlay)},upperdir={os.path.join(self.path, 'tmpdir', 'upper')},workdir={os.path.join(self.path, 'tmpdir', 'work')},userxattr")
         
         os.mkdir(os.path.join(self.path, "merged", old_root))
         try:
