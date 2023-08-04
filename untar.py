@@ -10,8 +10,8 @@ class TarFile:
                  ustarv: bytes, uname: bytes, gname: bytes, major: bytes, minor: bytes, prefix: bytes):
         decode = lambda b: b.decode().split('\0', 1)[0]
 
-        if ustar != b'ustar\0' or ustarv != b'00':
-            raise ValueError(f"ustar is {ustar}; ustarv is {ustarv}")
+        if ustar not in (b'ustar\0', b'ustar ') or ustarv not in (b'00', b' \x00'):
+            raise NotImplementedError(f"ustar is {ustar}; ustarv is {ustarv}")
 
         self.path = os.path.join(decode(prefix), decode(path))
         self.mode = int(decode(mode), base=8)
@@ -121,39 +121,49 @@ def untar(fp: BinaryIO) -> Generator[TarFile, None, None]:
         data = fp.read(size)
         file.data = data[:file.size]
 
-        # See whether we are dealing with a pax header
-        if file.type == 'x' or file.type == 'g':
-            pax = unpax(file.data)
-            if file.type == 'x':
-                pax_x = pax
-            else:
-                pax_g = pax
+        match file.type:
+            case 'x' | 'g':
+                # This block is a pax header, so parse the contents and continue
+                # looping.
 
-            # Don't yield pax headers
-            continue
-        else:
-            # Assign any pax headers present
-            pax = pax_g | pax_x
-            PAX = {
-                "ctime": float,
-                "mtime": float,
-                "atime": float,
-                "uid": int,
-                "gid": int
-            }
-            if 'size' in pax.keys():
-                raise NotImplementedError("pax header has size key")
-            for key, val in pax.items():
-                if len(val) > 0:
-                    fun = PAX.get(key, str)
-                    setattr(file, key, fun(val))
+                pax = unpax(file.data)
+                if file.type == 'x':
+                    pax_x = pax
+                else:
+                    pax_g = pax
 
-            # Reset the x header
-            pax_x = {}
+                continue
+            case 'L':
+                # This block is a GNU longname header, so put the contents in
+                # pax and continue looping.
+
+                pax_x['path'] = file.data.split(b'\0', 1)[0].decode()
+
+                continue
+            case 'K':
+                # Similar to the 'L' type, but then it is a long link
+
+                pax_x['linkpath'] = file.data.split(b'\0', 1)[0].decode()
+
+                continue
+            case _:
+                # Assign any pax headers present
+                pax = pax_g | pax_x
+                PAX = {
+                    "ctime": float,
+                    "mtime": float,
+                    "atime": float,
+                    "uid": int,
+                    "gid": int
+                }
+                if 'size' in pax.keys():
+                    raise NotImplementedError("pax header has size key")
+                for key, val in pax.items():
+                    if len(val) > 0:
+                        fun = PAX.get(key, str)
+                        setattr(file, key, fun(val))
+
+                # Reset the x header
+                pax_x = {}
 
         yield file
-
-if __name__ == "__main__":
-    with open("/home/ubuntu/foo.tar", "rb") as fp:
-        for file in untar(fp):
-            print(file)
