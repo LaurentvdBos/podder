@@ -5,4 +5,7 @@ setup(name="podder",
       author="Laurent van den Bos",
       author_email="laurentvdbos@outlook.com",
       license="MIT",
-      packages=find_packages(include=['podder']))
+      packages=find_packages(include=['podder']),
+      entry_points={
+            'console_scripts': ['podder=podder.__main__:main']
+      })

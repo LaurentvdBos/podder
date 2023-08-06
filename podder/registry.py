@@ -3,12 +3,12 @@ import json
 import os
 import re
 from typing import BinaryIO, Mapping, Optional
-from layer import Layer, setup_uidgidmap
+from podder.layer import Layer, setup_uidgidmap
 import urllib.request
 import urllib.parse
 
-import linux
-from untar import untar
+import podder.linux as linux
+from podder.untar import untar
 
 CONTTYPE_MANIFESTLIST = {"application/vnd.docker.distribution.manifest.list.v2+json", "application/vnd.oci.image.index.v1+json"}
 CONTTYPE_MANIFEST = {"application/vnd.docker.distribution.manifest.v2+json", "application/vnd.oci.image.manifest.v1+json"}
@@ -61,8 +61,8 @@ class BearerHandler(urllib.request.BaseHandler):
         finally:
             self.authorizing = False
 
-def pull(url: str):
-    (url, rest) = url.split("/", 1)
+def pull(full_url: str):
+    (url, rest) = full_url.split("/", 1)
     (name, reference) = rest.split(":", 1)
 
     opener = urllib.request.build_opener(BearerHandler)
@@ -105,7 +105,7 @@ def pull(url: str):
     # FIXME: seems we can always request an OCI config. Is that true?
     print("Retrieving configuration...")
     req = urllib.request.Request(f"https://{url}/v2/{name}/blobs/{manifest['config']['digest']}",
-                                 headers={"accept": "application/vnd.oci.image.config.v1+json"})
+                                 headers={"accept": ", ".join(CONTTYPE_CONFIG)})
     with opener.open(req) as resp:
         configuration = json.load(resp)
 
@@ -154,13 +154,15 @@ def pull(url: str):
         # Make the final layer with the configuration
         lay = Layer(name.split('/')[-1], parent=lay)
         print(f"Making {name.split('/')[-1]}...")
-        cmd = ""
+        cmd = []
         if isinstance(configuration['config'].get("Entrypoint"), list):
-            cmd += " ".join(configuration['config'].get("Entrypoint"))
+            cmd += configuration['config'].get("Entrypoint")
         if isinstance(configuration['config'].get("Cmd"), list):
-            cmd += " ".join(configuration['config'].get("Cmd"))
-        lay.config['cmd'] = cmd
-        lay.config['environment'] = {v.split('=', 1)[0]: v.split('=', 1)[-1] for v in configuration['config'].get("Env", [])}
+            cmd += configuration['config'].get("Cmd")
+        lay.cmd = cmd
+        lay.env = lay.env | {v.split('=', 1)[0]: v.split('=', 1)[-1] for v in configuration['config'].get("Env", [])}
+        lay.url = full_url
+        lay.ephemeral = True
         lay.write()
         
         os._exit(0)
@@ -176,7 +178,9 @@ def pull(url: str):
     os.close(w2)
     os.close(r2)
 
-    os.wait()
+    _, status = os.waitpid(pid, 0)
+    if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+        raise RuntimeError("Child crashed")
 
 if __name__ == "__main__":
     #foo = pull("registry-1.docker.io/pihole/pihole:latest")

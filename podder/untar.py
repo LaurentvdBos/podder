@@ -38,7 +38,7 @@ class TarFile:
         return "<TarFile %o %c %s %d %d %s (%d bytes)>" % (self.mode, self.type, self.path, self.uid, self.gid, str(datetime.fromtimestamp(self.mtime)), self.size)
     
     def write(self, path: str):
-        if (os.path.exists(os.path.join(path, self.path)) or os.path.islink(os.path.join(path, self.path))) and not os.path.isdir(os.path.join(path, self.path)):
+        if os.path.lexists(os.path.join(path, self.path)) and not os.path.isdir(os.path.join(path, self.path)):
             raise FileExistsError(self.path)
 
         dir_fd = os.open(path, os.O_DIRECTORY)

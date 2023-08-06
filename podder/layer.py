@@ -4,8 +4,8 @@ import shlex
 import signal
 import sys
 from typing import Dict, List, NoReturn, Optional
-from config import load_config, write_config
-import linux
+from podder.config import load_config, write_config
+import podder.linux as linux
 import termios
 
 LAYERPATH = "/home/ubuntu/layers"
@@ -54,11 +54,15 @@ class Layer:
 
     @property
     def env(self) -> Dict[str, str]:
-        value = self["environment"]
+        value = self["env"]
         if value is not None:
             return value
         else:
             return {}
+    
+    @env.setter
+    def env(self, value: Dict[str, str]):
+        self.config["env"] = value
     
     @property
     def cmd(self) -> List[str]:
@@ -68,6 +72,13 @@ class Layer:
         else:
             return []
     
+    @cmd.setter
+    def cmd(self, value: str | List[str]):
+        if isinstance(value, list):
+            value = shlex.join(value)
+        
+        self.config["cmd"] = value
+    
     @property
     def hostname(self) -> str:
         value = self["hostname"]
@@ -75,6 +86,10 @@ class Layer:
             return value
         else:
             return os.path.basename(self.path)
+    
+    @hostname.setter
+    def hostname(self, value: str):
+        self.config["hostname"] = value
     
     @property
     def domainname(self) -> str:
@@ -84,9 +99,28 @@ class Layer:
         else:
             return "(none)"
     
+    @domainname.setter
+    def domainname(self, value: str):
+        self.config["domainname"] = value
+    
     @property
     def ephemeral(self) -> bool:
         return bool(self["ephemeral"])
+    
+    @ephemeral.setter
+    def ephemeral(self, value: bool):
+        if value:
+            self.config["ephemeral"] = "yes"
+        else:
+            self.config["ephemeral"] = ""
+    
+    @property
+    def url(self) -> str:
+        return self["url"]
+    
+    @url.setter
+    def url(self, value: str):
+        self.config["url"] = str(value)
     
     @property
     def pidfile(self) -> str:
@@ -130,9 +164,9 @@ class Layer:
         directories that are already present, but will not change anything in
         the root file system."""
 
-        for which in ("merged", "root", "tmpdir"):
+        for which in ("merged", "root", "run"):
             os.makedirs(os.path.join(self.path, which), exist_ok=True)
-        if os.path.islink(os.path.join(self.path, "parent")):
+        if os.path.lexists(os.path.join(self.path, "parent")):
             os.remove(os.path.join(self.path, "parent"))
         if self.parent is not None:
             os.symlink(self.parent.path, os.path.join(self.path, "parent"))
@@ -146,7 +180,7 @@ class Layer:
         self.parent = parent
         self.config = {}
 
-        if os.path.exists(os.path.join(self.path, "parent")):
+        if os.path.exists(os.path.join(self.path, "parent")) and parent is None:
             parentpath = os.path.realpath(os.path.join(self.path, "parent"))
             self.parent = Layer(parentpath)
 
@@ -165,7 +199,7 @@ class Layer:
             linux.CLONE_NEWNET | linux.CLONE_NEWTIME
 
         r, w = os.pipe()
-        if os.fork() == 0:
+        if (pid := os.fork()) == 0:
             os.close(w)
 
             # Wait for the parent to unshare
@@ -181,24 +215,30 @@ class Layer:
 
         # Signal child that we have unshared by closing the pipe
         os.close(w)
-        os.wait()
+        _, status = os.waitpid(pid, 0)
+        if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+            raise RuntimeError("Child crashed")
+
+        # Ensure mount events in root remain in this namespace. By default,
+        # Linux already marks this mount namespace as less privileged, since it
+        # is owned by a user namespace other than the default one.
+        linux.mount("ignored", "/", "ignored", linux.MS_PRIVATE | linux.MS_REC, None)
 
         # Forking is required to get a process with PID 1 in place. The parent
         # stays alive to record the pid in the parent namespace in a pid file.
         # Before forking, open the directory where the pid file must be written
         # (since the child will modify mounts) and record all terminal
         # attributes (since the child may modify those)
-        dir_fd = os.open(self.path, os.O_DIRECTORY)
+        dir_fd = os.open(os.path.dirname(self.pidfile), os.O_DIRECTORY)
         attr = termios.tcgetattr(sys.stdin.fileno())
-        pid = os.fork()
-        if pid > 0:
+        if (pid := os.fork()) > 0:
             # Create a pid file
             f = os.open("init.pid", os.O_CREAT | os.O_WRONLY, dir_fd=dir_fd)
             os.write(f, f"{pid}\n".encode())
             os.close(f)
 
             while True:
-                pid, status = os.waitpid(pid, 0)
+                _, status = os.waitpid(pid, 0)
 
                 if os.WIFEXITED(status) or os.WIFSIGNALED(status):
                     # Remove the pid file
@@ -212,77 +252,82 @@ class Layer:
 
                     if os.WIFEXITED(status):
                         # Exit with the same status code as init did
-                        sys.exit(os.waitstatus_to_exitcode(status))
+                        sys.exit(os.WEXITSTATUS(status))
                     if os.WIFSIGNALED(status):
                         # Exit with 128 + the signal number, a convention used by bash
                         sys.exit(128 + os.WTERMSIG(status))
         else:
             os.close(dir_fd)
 
-        old_root = "old_root"
-
-        # Build up the layers using an overlayfs. All the changeable folders of
-        # the overlayfs are put in a tmpfs, which is destroyed whenever the
-        # mount namespace ceases to exist.
-        # FIXME: should be done based on "ephemeral" configuration
+        # Build up the layers of the overlayfs. If the layer is ephemeral, the
+        # top layer is put on a tmpfs.
         overlay = self.overlay()
-        linux.mount("none", os.path.join(self.path, "tmpdir"), "tmpfs", 0, None)
-        os.mkdir(os.path.join(self.path, "tmpdir", "work"))
-        os.mkdir(os.path.join(self.path, "tmpdir", "upper"))
-        linux.mount("none",
-                    os.path.join(self.path, "merged"),
-                    "overlay",
-                    0,
-                    f"lowerdir={':'.join(overlay)},upperdir={os.path.join(self.path, 'tmpdir', 'upper')},workdir={os.path.join(self.path, 'tmpdir', 'work')},userxattr")
-        
-        os.mkdir(os.path.join(self.path, "merged", old_root))
+        work = os.path.join(self.path, "run")
+        if self.ephemeral:
+            linux.mount("none", os.path.join(self.path, "run"), "tmpfs", 0, None)
+            os.mkdir(os.path.join(self.path, "run", "work"))
+            os.mkdir(os.path.join(self.path, "run", "upper"))
+            work = os.path.join(self.path, "run", "work")
+            overlay = [os.path.join(self.path, "run", "upper")] + overlay
+        if len(overlay) > 1:
+            linux.mount("none",
+                        os.path.join(self.path, "merged"),
+                        "overlay",
+                        0,
+                        f"lowerdir={':'.join(overlay[1:])},upperdir={overlay[0]},workdir={work},userxattr")
+        else:
+            # If it is only one layer, there is nothing to overlay
+            linux.mount(overlay[0], os.path.join(self.path, "merged"), "ignored", linux.MS_BIND, None)
+
+        os.mkdir(os.path.join(self.path, "merged", "old_root"))
+        linux.pivot_root(os.path.join(self.path, "merged"), os.path.join(self.path, "merged", "old_root"))
+        os.chdir("/")
+
+        # Mount /proc and /sys
+        linux.mount("none", "/proc", "proc", 0, None)
         try:
-            linux.pivot_root(os.path.join(self.path, "merged"), os.path.join(self.path, "merged", old_root))
+            # This only works when we have a network namespace
+            linux.mount("none", "/sys", "sysfs", 0, None)
+        except PermissionError:
+            linux.mount("/old_root/sys", "/sys", "ignored", linux.MS_BIND | linux.MS_REC, None)
             try:
-                os.chdir("/")
+                linux.umount("/sys/fs/cgroup")
+            except FileNotFoundError:
+                pass
+        
+        # Mount cgroup
+        linux.mount("none", "/sys/fs/cgroup", "cgroup2", 0, None)
 
-                # Ensure mount events in old root remain in this namespace
-                linux.mount("ignored", f"/{old_root}", "ignored", linux.MS_SLAVE | linux.MS_REC, None)
+        # Populate a /dev directory
+        linux.mount("none", "/dev", "tmpfs", 0, None)
+        os.symlink("/proc/self/fd", "/dev/fd")
+        os.symlink("/proc/self/fd/0", "/dev/stdin")
+        os.symlink("/proc/self/fd/1", "/dev/stdout")
+        os.symlink("/proc/self/fd/2", "/dev/stderr")
+        os.mkdir("/dev/shm")
+        linux.mount("none", "/dev/shm", "tmpfs", 0, None)
 
-                # Mount /proc and /sys
-                linux.mount("none", "/proc", "proc", 0, None)
-                try:
-                    # This only works when we have a network namespace
-                    linux.mount("none", "/sys", "sysfs", 0, None)
-                except PermissionError:
-                    linux.mount(f"/{old_root}/sys", "/sys", "ignored", linux.MS_BIND | linux.MS_REC, None)
+        for what in ("null", "zero", "full", "random", "urandom", "tty"):
+            # Ensure the file exists
+            open(f"/dev/{what}", mode='w').close()
 
-                # Populate a /dev directory
-                linux.mount("none", "/dev", "tmpfs", 0, None)
-                os.symlink("/proc/self/fd", "/dev/fd")
-                os.symlink("/proc/self/fd/0", "/dev/stdin")
-                os.symlink("/proc/self/fd/1", "/dev/stdout")
-                os.symlink("/proc/self/fd/2", "/dev/stderr")
-                os.mkdir("/dev/shm")
-                linux.mount("none", "/dev/shm", "tmpfs", 0, None)
+            # Do the bind mount
+            linux.mount(f"/old_root/dev/{what}", f"/dev/{what}", "ignored", linux.MS_BIND, None)
+        
+        os.mkdir("/dev/mqueue")
+        linux.mount("none", "/dev/mqueue", "mqueue", 0, None)
 
-                for what in ("null", "zero", "full", "random", "urandom", "tty"):
-                    # Ensure the file exists
-                    open(f"/dev/{what}", mode='w').close()
+        # Create some temporary directories
+        linux.mount("none", "/tmp", "tmpfs", 0, None)
+        linux.mount("none", "/run", "tmpfs", 0, None)
 
-                    # Do the bind mount
-                    linux.mount(f"/{old_root}/dev/{what}", f"/dev/{what}", "ignored", linux.MS_BIND, None)
+        # Unmount the old root
+        linux.umount("/old_root", linux.MNT_DETACH)
 
-                # Create some temporary directories
-                linux.mount("none", "/tmp", "tmpfs", 0, None)
-                linux.mount("none", "/run", "tmpfs", 0, None)
-            finally:
-                # Unmount the old root
-                linux.umount(f"/{old_root}", linux.MNT_DETACH)
-        finally:
-            # Remove the old root directory
-            os.rmdir(f"/{old_root}")
+        # Remove the old root directory
+        os.rmdir(f"/old_root")
         
         linux.sethostname(self.hostname)
         linux.setdomainname(self.domainname)
         
         os.execvpe(self.cmd[0], self.cmd, self.env)
-
-if __name__ == "__main__":
-    layer = Layer("ubuntu")
-    layer.start()

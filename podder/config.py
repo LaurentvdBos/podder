@@ -45,6 +45,6 @@ def write_config(file: str, config: Dict):
 
         for section, subconfig in config.items():
             if isinstance(subconfig, dict):
-                print(f"[{section}]", file=fp)
+                print(f"\n[{section}]", file=fp)
                 for key, value in subconfig.items():
                     print(f"{key} = {value}", file=fp)
