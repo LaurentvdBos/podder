@@ -25,7 +25,11 @@ def create(args):
 
 def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--layerpath', help="path where the individual layers are stored", default=layer.LAYERPATH)
+    parser.add_argument('--layerpath', help="""Path where the layers are stored.
+                        This path is created if it does not exist (yet). The
+                        default can be overridden using the $LAYERPATH
+                        environment variable.""",
+                        default=layer.LAYERPATH)
 
     subparsers = parser.add_subparsers(title="actions", required=True)
 

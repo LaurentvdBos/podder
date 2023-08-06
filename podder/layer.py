@@ -8,7 +8,9 @@ from podder.config import load_config, write_config
 import podder.linux as linux
 import termios
 
-LAYERPATH = "/home/ubuntu/layers"
+# The layerpath is $LAYERPATH, or $XDG_DATA_HOME/podder if that does not exist,
+# or ~/.local/share/podder if that one does not exist.
+LAYERPATH = os.getenv("LAYERPATH", os.path.join(os.getenv("XDG_DATA_HOME", os.path.expanduser("~/.local/share")), "podder"))
 
 def setup_uidgidmap(pid: int):
     uid = os.geteuid()
@@ -194,9 +196,8 @@ class Layer:
         if os.path.exists(self.pidfile):
             raise FileExistsError(f"{self.pidfile}")
 
-        flags = linux.CLONE_NEWNS | linux.CLONE_NEWCGROUP | linux.CLONE_NEWUTS | \
-            linux.CLONE_NEWIPC | linux.CLONE_NEWUSER | linux.CLONE_NEWPID | \
-            linux.CLONE_NEWNET | linux.CLONE_NEWTIME
+        # TODO: do we want CLONE_NEWTIME and implement CLONE_NEWNET / CLONE_NEWUTS
+        flags = linux.CLONE_NEWNS | linux.CLONE_NEWCGROUP | linux.CLONE_NEWIPC | linux.CLONE_NEWUSER | linux.CLONE_NEWPID
 
         r, w = os.pipe()
         if (pid := os.fork()) == 0:
@@ -238,96 +239,112 @@ class Layer:
             os.close(f)
 
             while True:
-                _, status = os.waitpid(pid, 0)
+                try:
+                    _, status = os.waitpid(pid, 0)
 
-                if os.WIFEXITED(status) or os.WIFSIGNALED(status):
+                    if os.WIFEXITED(status) or os.WIFSIGNALED(status):
+
+                        # Restore the terminal to its original state; this will
+                        # send SIGTTOU since this is a background process, which
+                        # we ignore.
+                        signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+                        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, attr)
+
+                        if os.WIFEXITED(status):
+                            # Exit with the same status code as init did
+                            sys.exit(os.WEXITSTATUS(status))
+                        if os.WIFSIGNALED(status):
+                            # Exit with 128 + the signal number, a convention used by bash
+                            sys.exit(128 + os.WTERMSIG(status))
+                finally:
                     # Remove the pid file
                     os.remove("init.pid", dir_fd=dir_fd)
-
-                    # Restore the terminal to its original state; this will
-                    # send SIGTTOU since this is a background process, which
-                    # we ignore.
-                    signal.signal(signal.SIGTTOU, signal.SIG_IGN)
-                    termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, attr)
-
-                    if os.WIFEXITED(status):
-                        # Exit with the same status code as init did
-                        sys.exit(os.WEXITSTATUS(status))
-                    if os.WIFSIGNALED(status):
-                        # Exit with 128 + the signal number, a convention used by bash
-                        sys.exit(128 + os.WTERMSIG(status))
         else:
             os.close(dir_fd)
-
+        
         # Build up the layers of the overlayfs. If the layer is ephemeral, the
         # top layer is put on a tmpfs.
         overlay = self.overlay()
         work = os.path.join(self.path, "run")
+        userxattr = ",userxattr"
         if self.ephemeral:
-            linux.mount("none", os.path.join(self.path, "run"), "tmpfs", 0, None)
+            linux.mount("none", os.path.join(self.path, "run"), "tmpfs", 0, "mode=777")
             os.mkdir(os.path.join(self.path, "run", "work"))
             os.mkdir(os.path.join(self.path, "run", "upper"))
             work = os.path.join(self.path, "run", "work")
             overlay = [os.path.join(self.path, "run", "upper")] + overlay
+
+            # tmpfs does not support user extended attributes, but since we
+            # mounted the tmpfs ourselves, we can use regular ones (which are
+            # supported)
+            userxattr = ""
         if len(overlay) > 1:
             linux.mount("none",
                         os.path.join(self.path, "merged"),
                         "overlay",
                         0,
-                        f"lowerdir={':'.join(overlay[1:])},upperdir={overlay[0]},workdir={work},userxattr")
+                        f"lowerdir={':'.join(overlay[1:])},upperdir={overlay[0]},workdir={work},xino=off{userxattr}")
         else:
             # If it is only one layer, there is nothing to overlay
             linux.mount(overlay[0], os.path.join(self.path, "merged"), "ignored", linux.MS_BIND, None)
 
         os.mkdir(os.path.join(self.path, "merged", "old_root"))
-        linux.pivot_root(os.path.join(self.path, "merged"), os.path.join(self.path, "merged", "old_root"))
-        os.chdir("/")
-
-        # Mount /proc and /sys
-        linux.mount("none", "/proc", "proc", 0, None)
         try:
-            # This only works when we have a network namespace
-            linux.mount("none", "/sys", "sysfs", 0, None)
-        except PermissionError:
-            linux.mount("/old_root/sys", "/sys", "ignored", linux.MS_BIND | linux.MS_REC, None)
+            linux.pivot_root(os.path.join(self.path, "merged"), os.path.join(self.path, "merged", "old_root"))
+            os.chdir("/")
             try:
-                linux.umount("/sys/fs/cgroup")
-            except FileNotFoundError:
-                pass
-        
-        # Mount cgroup
-        linux.mount("none", "/sys/fs/cgroup", "cgroup2", 0, None)
+                # Mount /proc and /sys
+                linux.mount("none", "/proc", "proc", 0, None)
+                try:
+                    # This only works when we have a network namespace
+                    linux.mount("none", "/sys", "sysfs", 0, None)
+                    linux.mount("none", "/sys/fs/cgroup", "cgroup2", 0, None)
+                except PermissionError:
+                    linux.mount("/old_root/sys", "/sys", "ignored", linux.MS_BIND | linux.MS_REC, None)
+                
+                # Populate a /dev directory. The mode=777 makes sure there is no
+                # 'sticky' bit, which blocks writing to a device in dev with -EACCES
+                linux.mount("none", "/dev", "tmpfs", 0, "mode=777")
+                os.symlink("/proc/self/fd", "/dev/fd")
+                os.symlink("/proc/self/fd/0", "/dev/stdin")
+                os.symlink("/proc/self/fd/1", "/dev/stdout")
+                os.symlink("/proc/self/fd/2", "/dev/stderr")
+                os.mkdir("/dev/shm")
+                linux.mount("none", "/dev/shm", "tmpfs", 0, "mode=777")
 
-        # Populate a /dev directory
-        linux.mount("none", "/dev", "tmpfs", 0, None)
-        os.symlink("/proc/self/fd", "/dev/fd")
-        os.symlink("/proc/self/fd/0", "/dev/stdin")
-        os.symlink("/proc/self/fd/1", "/dev/stdout")
-        os.symlink("/proc/self/fd/2", "/dev/stderr")
-        os.mkdir("/dev/shm")
-        linux.mount("none", "/dev/shm", "tmpfs", 0, None)
+                for what in ("null", "zero", "full", "random", "urandom", "tty"):
+                    # Ensure the file exists
+                    open(f"/dev/{what}", mode='w').close()
 
-        for what in ("null", "zero", "full", "random", "urandom", "tty"):
-            # Ensure the file exists
-            open(f"/dev/{what}", mode='w').close()
+                    # Do the bind mount
+                    linux.mount(f"/old_root/dev/{what}", f"/dev/{what}", "ignored", linux.MS_BIND, None)
+                
+                os.mkdir("/dev/mqueue")
+                linux.mount("none", "/dev/mqueue", "mqueue", 0, None)
 
-            # Do the bind mount
-            linux.mount(f"/old_root/dev/{what}", f"/dev/{what}", "ignored", linux.MS_BIND, None)
-        
-        os.mkdir("/dev/mqueue")
-        linux.mount("none", "/dev/mqueue", "mqueue", 0, None)
+                # The tty should be the same as the one we had, so bind mount that
+                os.mkdir("/dev/pts")
+                linux.mount("none", "/dev/pts", "devpts", 0, "newinstance")
+                os.symlink("pts/ptmx", "/dev/ptmx")
 
-        # Create some temporary directories
-        linux.mount("none", "/tmp", "tmpfs", 0, None)
-        linux.mount("none", "/run", "tmpfs", 0, None)
+                # Add bind mounts to configure network
+                for what in ("/etc/hosts", "/etc/hostname", "/etc/resolv.conf"):
+                    # Ensure the file exists
+                    open(what, mode='w').close()
 
-        # Unmount the old root
-        linux.umount("/old_root", linux.MNT_DETACH)
+                    # Do the bind mount
+                    linux.mount(f"/old_root" + os.readlink(what) if os.path.islink(what) else what, what, "ignored", linux.MS_BIND, None)
 
-        # Remove the old root directory
-        os.rmdir(f"/old_root")
-        
-        linux.sethostname(self.hostname)
-        linux.setdomainname(self.domainname)
+                # Create some temporary directories
+                linux.mount("none", "/tmp", "tmpfs", 0, "mode=777")
+                linux.mount("none", "/run", "tmpfs", 0, "mode=777")
+
+            finally:
+                # Unmount the old root
+                linux.umount("/old_root", linux.MNT_DETACH)
+
+        finally:
+            # Remove the old root directory
+            os.rmdir(f"/old_root")
         
         os.execvpe(self.cmd[0], self.cmd, self.env)
