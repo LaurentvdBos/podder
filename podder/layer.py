@@ -1,8 +1,11 @@
+from fcntl import ioctl
 import os
 import pwd
+from select import select
 import shlex
 import signal
 import sys
+import tty
 from typing import Dict, List, NoReturn, Optional
 from podder.config import load_config, write_config
 import podder.linux as linux
@@ -200,11 +203,12 @@ class Layer:
         flags = linux.CLONE_NEWNS | linux.CLONE_NEWCGROUP | linux.CLONE_NEWIPC | linux.CLONE_NEWUSER | linux.CLONE_NEWPID
 
         r, w = os.pipe()
+        fd = os.eventfd(0)
         if (pid := os.fork()) == 0:
             os.close(w)
 
             # Wait for the parent to unshare
-            _ = os.read(r, 1)
+            os.eventfd_read(fd)
 
             setup_uidgidmap(os.getppid())
             
@@ -215,52 +219,20 @@ class Layer:
         linux.unshare(flags)
 
         # Signal child that we have unshared by closing the pipe
-        os.close(w)
+        os.eventfd_write(fd, 1)
         _, status = os.waitpid(pid, 0)
         if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
             raise RuntimeError("Child crashed")
+        os.close(fd)
 
         # Ensure mount events in root remain in this namespace. By default,
         # Linux already marks this mount namespace as less privileged, since it
         # is owned by a user namespace other than the default one.
         linux.mount("ignored", "/", "ignored", linux.MS_PRIVATE | linux.MS_REC, None)
 
-        # Forking is required to get a process with PID 1 in place. The parent
-        # stays alive to record the pid in the parent namespace in a pid file.
-        # Before forking, open the directory where the pid file must be written
-        # (since the child will modify mounts) and record all terminal
-        # attributes (since the child may modify those)
+        # Take note of the directory where we need to write the pidfile to. This
+        # file pointer will survive pivot_root.
         dir_fd = os.open(os.path.dirname(self.pidfile), os.O_DIRECTORY)
-        attr = termios.tcgetattr(sys.stdin.fileno())
-        if (pid := os.fork()) > 0:
-            # Create a pid file
-            f = os.open("init.pid", os.O_CREAT | os.O_WRONLY, dir_fd=dir_fd)
-            os.write(f, f"{pid}\n".encode())
-            os.close(f)
-
-            while True:
-                try:
-                    _, status = os.waitpid(pid, 0)
-
-                    if os.WIFEXITED(status) or os.WIFSIGNALED(status):
-
-                        # Restore the terminal to its original state; this will
-                        # send SIGTTOU since this is a background process, which
-                        # we ignore.
-                        signal.signal(signal.SIGTTOU, signal.SIG_IGN)
-                        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, attr)
-
-                        if os.WIFEXITED(status):
-                            # Exit with the same status code as init did
-                            sys.exit(os.WEXITSTATUS(status))
-                        if os.WIFSIGNALED(status):
-                            # Exit with 128 + the signal number, a convention used by bash
-                            sys.exit(128 + os.WTERMSIG(status))
-                finally:
-                    # Remove the pid file
-                    os.remove("init.pid", dir_fd=dir_fd)
-        else:
-            os.close(dir_fd)
         
         # Build up the layers of the overlayfs. If the layer is ephemeral, the
         # top layer is put on a tmpfs.
@@ -293,24 +265,15 @@ class Layer:
             linux.pivot_root(os.path.join(self.path, "merged"), os.path.join(self.path, "merged", "old_root"))
             os.chdir("/")
             try:
-                # Mount /proc and /sys
-                linux.mount("none", "/proc", "proc", 0, None)
-                try:
-                    # This only works when we have a network namespace
-                    linux.mount("none", "/sys", "sysfs", 0, None)
-                    linux.mount("none", "/sys/fs/cgroup", "cgroup2", 0, None)
-                except PermissionError:
-                    linux.mount("/old_root/sys", "/sys", "ignored", linux.MS_BIND | linux.MS_REC, None)
-                
-                # Populate a /dev directory. The mode=777 makes sure there is no
+                # Populate a /dev directory. The mode=755 makes sure there is no
                 # 'sticky' bit, which blocks writing to a device in dev with -EACCES
-                linux.mount("none", "/dev", "tmpfs", 0, "mode=777")
+                linux.mount("none", "/dev", "tmpfs", linux.MS_NOSUID, "mode=755")
                 os.symlink("/proc/self/fd", "/dev/fd")
                 os.symlink("/proc/self/fd/0", "/dev/stdin")
                 os.symlink("/proc/self/fd/1", "/dev/stdout")
                 os.symlink("/proc/self/fd/2", "/dev/stderr")
                 os.mkdir("/dev/shm")
-                linux.mount("none", "/dev/shm", "tmpfs", 0, "mode=777")
+                linux.mount("none", "/dev/shm", "tmpfs", linux.MS_NOSUID | linux.MS_NODEV, "mode=1777")
 
                 for what in ("null", "zero", "full", "random", "urandom", "tty"):
                     # Ensure the file exists
@@ -320,12 +283,119 @@ class Layer:
                     linux.mount(f"/old_root/dev/{what}", f"/dev/{what}", "ignored", linux.MS_BIND, None)
                 
                 os.mkdir("/dev/mqueue")
-                linux.mount("none", "/dev/mqueue", "mqueue", 0, None)
+                linux.mount("none", "/dev/mqueue", "mqueue", linux.MS_NOSUID | linux.MS_NODEV | linux.MS_NOEXEC, None)
 
-                # The tty should be the same as the one we had, so bind mount that
+                # Initialize the pseudotty dev
                 os.mkdir("/dev/pts")
-                linux.mount("none", "/dev/pts", "devpts", 0, "newinstance")
+                linux.mount("none", "/dev/pts", "devpts", 0, "newinstance,mode=620,ptmxmode=666,gid=5")
                 os.symlink("pts/ptmx", "/dev/ptmx")
+
+                # With a (potential) pseudotty in place, fork to create a process with PID 1.
+                if os.isatty(sys.stdin.fileno()):
+                    attr = termios.tcgetattr(sys.stdin.fileno())
+                    pid, fd = os.forkpty()
+
+                    if pid == 0:
+                        # Create /dev/console pointing to the pseudo tty
+                        open("/dev/console", mode='w').close()
+                        linux.mount(os.ttyname(sys.stdin.fileno()), "/dev/console", "ignored", linux.MS_BIND, None)
+                else:
+                    pid = os.fork()
+                    fd = -1
+                if pid > 0:
+                    exit_code = 1
+
+                    # Create a pid file
+                    f = os.open("init.pid", os.O_CREAT | os.O_WRONLY, dir_fd=dir_fd)
+                    os.write(f, f"{pid}\n".encode())
+                    os.close(f)
+
+                    try:
+                        if fd > -1:
+                            tty.setraw(sys.stdin.fileno())
+
+                            def sigwinch(signum, frame):
+                                winsz = ioctl(sys.stdin.fileno(), termios.TIOCGWINSZ, b" " * 1024)
+                                ioctl(fd, termios.TIOCSWINSZ, winsz)
+
+                            signal.signal(signal.SIGWINCH, sigwinch)
+                            signal.raise_signal(signal.SIGWINCH)
+
+                            stdin = b""
+                            stdout = b""
+                            while True:
+                                rlist = []
+                                wlist = []
+                                if stdin:
+                                    wlist += [fd]
+                                else:
+                                    rlist += [sys.stdin.fileno()]
+                                if stdout:
+                                    wlist += [sys.stdout.fileno()]
+                                else:
+                                    rlist += [fd]
+
+                                rlist, wlist, _ = select(rlist, wlist, [])
+
+                                if sys.stdin.fileno() in rlist:
+                                    stdin = os.read(sys.stdin.fileno(), 1024)
+                                    if not stdin:
+                                        os.close(fd)
+                                
+                                if fd in rlist:
+                                    try:
+                                        stdout = os.read(fd, 1024)
+                                    except OSError as e:
+                                        stdout = b""
+                                    if not stdout:
+                                        break
+                                
+                                if sys.stdout.fileno() in wlist:
+                                    n = os.write(sys.stdout.fileno(), stdout)
+                                    stdout = stdout[n:]
+                                
+                                if fd in wlist:
+                                    n = os.write(fd, stdin)
+                                    stdin = stdin[n:]
+
+                        while True:
+                            _, status = os.waitpid(pid, 0)
+
+                            if os.WIFEXITED(status) or os.WIFSIGNALED(status):
+                                if os.WIFEXITED(status):
+                                    # Exit with the same status code as init did
+                                    sys.exit(os.WEXITSTATUS(status))
+                                if os.WIFSIGNALED(status):
+                                    # Exit with 128 + the signal number, a convention used by bash
+                                    sys.exit(128 + os.WTERMSIG(status))
+                    except SystemExit as e:
+                        # Stop SystemExit from bubbling up
+                        exit_code = e.code
+                    finally:
+                        # Restore the terminal to its original state; this will
+                        # send SIGTTOU since this is a background process, which
+                        # we ignore.
+                        if fd > -1:
+                            signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+                            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, attr)
+
+                        # Remove the pid file
+                        os.remove("init.pid", dir_fd=dir_fd)
+
+                        # Exit the Python process
+                        sys.stdout.flush()
+                        os._exit(exit_code)
+                else:
+                    os.close(dir_fd)
+
+                # We are now pid 1, so mount /proc and /sys
+                linux.mount("none", "/proc", "proc",  linux.MS_NODEV | linux.MS_NOSUID | linux.MS_NOEXEC, None)
+                try:
+                    # This only works when we have a network namespace
+                    linux.mount("none", "/sys", "sysfs", 0, None)
+                    linux.mount("none", "/sys/fs/cgroup", "cgroup2", 0, None)
+                except PermissionError:
+                    linux.mount("/old_root/sys", "/sys", "ignored", linux.MS_BIND | linux.MS_REC, None)
 
                 # Add bind mounts to configure network
                 for what in ("/etc/hosts", "/etc/hostname", "/etc/resolv.conf"):
@@ -336,13 +406,11 @@ class Layer:
                     linux.mount(f"/old_root" + os.readlink(what) if os.path.islink(what) else what, what, "ignored", linux.MS_BIND, None)
 
                 # Create some temporary directories
-                linux.mount("none", "/tmp", "tmpfs", 0, "mode=777")
+                linux.mount("none", "/tmp", "tmpfs", 0, "mode=1777")
                 linux.mount("none", "/run", "tmpfs", 0, "mode=777")
-
             finally:
                 # Unmount the old root
                 linux.umount("/old_root", linux.MNT_DETACH)
-
         finally:
             # Remove the old root directory
             os.rmdir(f"/old_root")
