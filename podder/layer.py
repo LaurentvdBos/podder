@@ -310,6 +310,13 @@ class Layer:
                     os.write(f, f"{pid}\n".encode())
                     os.close(f)
 
+                    # Catch SIGTERM and, if it happens, also send it to the child
+                    def sigterm(signum, frame):
+                        os.kill(pid)
+                        os._exit(128 + signum)
+                    
+                    signal.signal(signal.SIGTERM, sigterm)
+
                     try:
                         if fd > -1:
                             tty.setraw(sys.stdin.fileno())
