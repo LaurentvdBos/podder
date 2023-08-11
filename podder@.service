@@ -1,0 +1,23 @@
+# Put this file in
+#   ~/.config/systemd/user
+# and then use
+#   systemctl --user start/enable podder@<layer>.service
+# to manage an existing layer.
+#
+# Notice that your systemd unit will be tied to a login session unless you
+# enable lingering:
+#   loginctl enable-linger <username>
+
+[Unit]
+Description=Podder layer %I
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Restart=on-failure
+TimeoutStopSec=70
+ExecStart=~/.local/bin/podder start %I
+Type=exec
+
+[Install]
+WantedBy=default.target
