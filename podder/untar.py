@@ -49,6 +49,7 @@ class TarFile:
                     os.write(f, self.data)
                     os.utime(f, times=(self.atime if self.atime is not None else self.mtime, self.mtime))
                     os.chown(f, self.uid, self.gid)
+                    os.chmod(f, self.mode)
                     os.close(f)
                 
                 case '1':
