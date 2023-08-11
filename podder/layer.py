@@ -313,8 +313,6 @@ class Layer:
                     # Catch SIGTERM and, if it happens, also send it to the child
                     def sigterm(signum, frame):
                         os.kill(pid, signum)
-                        os.waitpid(pid, 0)
-                        os._exit(128 + signum)
                     
                     signal.signal(signal.SIGTERM, sigterm)
 
