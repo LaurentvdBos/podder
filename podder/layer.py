@@ -203,7 +203,7 @@ class Layer:
                 try:
                     os.kill(pid, 0)
                 except OSError:
-                    print(f"Could not find process with pid {pid}; did the layer crash?" % pid, file=sys.stderr)
+                    print(f"Could not find process with pid {pid}; did the layer crash?", file=sys.stderr)
                     os.remove(self.pidfile)
                 else:
                     raise FileExistsError(f"{self.pidfile}")
