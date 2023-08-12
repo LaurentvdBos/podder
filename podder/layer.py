@@ -203,10 +203,10 @@ class Layer:
                 try:
                     os.kill(pid, 0)
                 except OSError:
-                    raise FileExistsError(f"{self.pidfile}")
-                else:
                     print(f"Could not find process with pid {pid}; did the layer crash?" % pid, file=sys.stderr)
                     os.remove(self.pidfile)
+                else:
+                    raise FileExistsError(f"{self.pidfile}")
 
         # TODO: do we want CLONE_NEWTIME and implement CLONE_NEWNET / CLONE_NEWUTS
         flags = linux.CLONE_NEWNS | linux.CLONE_NEWCGROUP | linux.CLONE_NEWIPC | linux.CLONE_NEWUSER | linux.CLONE_NEWPID
@@ -361,7 +361,7 @@ class Layer:
                                 if fd in rlist:
                                     try:
                                         stdout = os.read(fd, 1024)
-                                    except OSError as e:
+                                    except OSError:
                                         stdout = b""
                                     if not stdout:
                                         break
@@ -378,13 +378,10 @@ class Layer:
 
                         if os.WIFEXITED(status):
                             # Exit with the same status code as init did
-                            sys.exit(os.WEXITSTATUS(status))
+                            exit_code = os.WEXITSTATUS(status)
                         if os.WIFSIGNALED(status):
                             # Exit with 128 + the signal number, a convention used by bash
-                            sys.exit(128 + os.WTERMSIG(status))
-                    except SystemExit as e:
-                        # Stop SystemExit from bubbling up
-                        exit_code = e.code
+                            exit_code = 128 + os.WTERMSIG(status)
                     finally:
                         # Restore the terminal to its original state; this will
                         # send SIGTTOU since this is a background process, which

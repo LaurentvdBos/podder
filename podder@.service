@@ -15,7 +15,6 @@ After=network-online.target
 
 [Service]
 Restart=on-failure
-TimeoutStopSec=70
 ExecStart=%h/.local/bin/podder start %I
 Type=exec
 
