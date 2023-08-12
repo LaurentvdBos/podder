@@ -60,15 +60,16 @@ class TarFile:
                 
                 case '3':
                     os.mknod(self.path, self.mode | stat.S_IFCHR, os.makedev(self.major, self.minor), dir_fd=dir_fd)
+                    os.chmod(self.path, self.mode)
                 
                 case '4':
                     os.mknod(self.path, self.mode | stat.S_IFBLK, os.makedev(self.major, self.minor), dir_fd=dir_fd)
+                    os.chmod(self.path, self.mode)
                 
                 case '5':
-                    if os.path.isdir(os.path.join(path, self.path)):
-                        os.chmod(self.path, self.mode, dir_fd=dir_fd)
-                    else:
+                    if not os.path.isdir(os.path.join(path, self.path)):
                         os.mkdir(self.path, self.mode, dir_fd=dir_fd)
+                    os.chmod(self.path, self.mode, dir_fd=dir_fd)
                 
                 case _:
                     raise NotImplementedError(f"File type {self.type} unknown")
