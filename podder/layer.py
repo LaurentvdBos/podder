@@ -197,7 +197,16 @@ class Layer:
         if not os.path.exists(self.path):
             raise FileNotFoundError(f"{self.path}")
         if os.path.exists(self.pidfile):
-            raise FileExistsError(f"{self.pidfile}")
+            # Check whether the layer is running, and if it does, do not continue
+            with open(self.pidfile, mode='r') as f:
+                pid = int(f.read())
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    raise FileExistsError(f"{self.pidfile}")
+                else:
+                    print(f"Could not find process with pid {pid}; did the layer crash?" % pid, file=sys.stderr)
+                    os.remove(self.pidfile)
 
         # TODO: do we want CLONE_NEWTIME and implement CLONE_NEWNET / CLONE_NEWUTS
         flags = linux.CLONE_NEWNS | linux.CLONE_NEWCGROUP | linux.CLONE_NEWIPC | linux.CLONE_NEWUSER | linux.CLONE_NEWPID
@@ -310,8 +319,9 @@ class Layer:
                     os.write(f, f"{pid}\n".encode())
                     os.close(f)
 
-                    # Catch SIGTERM and, if it happens, also send it to the child
+                    # Catch SIGTERM and send it to the child
                     def sigterm(signum, frame):
+                        print("Terminating.", flush=True)
                         os.kill(pid, signum)
                     
                     signal.signal(signal.SIGTERM, sigterm)
@@ -364,16 +374,14 @@ class Layer:
                                     n = os.write(fd, stdin)
                                     stdin = stdin[n:]
 
-                        while True:
-                            _, status = os.waitpid(pid, 0)
+                        _, status = os.waitpid(pid, 0)
 
-                            if os.WIFEXITED(status) or os.WIFSIGNALED(status):
-                                if os.WIFEXITED(status):
-                                    # Exit with the same status code as init did
-                                    sys.exit(os.WEXITSTATUS(status))
-                                if os.WIFSIGNALED(status):
-                                    # Exit with 128 + the signal number, a convention used by bash
-                                    sys.exit(128 + os.WTERMSIG(status))
+                        if os.WIFEXITED(status):
+                            # Exit with the same status code as init did
+                            sys.exit(os.WEXITSTATUS(status))
+                        if os.WIFSIGNALED(status):
+                            # Exit with 128 + the signal number, a convention used by bash
+                            sys.exit(128 + os.WTERMSIG(status))
                     except SystemExit as e:
                         # Stop SystemExit from bubbling up
                         exit_code = e.code
@@ -410,10 +418,6 @@ class Layer:
 
                     # Do the bind mount
                     linux.mount(f"/old_root" + os.readlink(what) if os.path.islink(what) else what, what, "ignored", linux.MS_BIND, None)
-
-                # Create some temporary directories
-                linux.mount("none", "/tmp", "tmpfs", 0, "mode=1777")
-                linux.mount("none", "/run", "tmpfs", 0, "mode=777")
             finally:
                 # Unmount the old root
                 linux.umount("/old_root", linux.MNT_DETACH)
