@@ -16,8 +16,11 @@ After=network-online.target
 [Service]
 Restart=on-failure
 ExecStart=%h/.local/bin/podder start %I
-Type=exec
-KillMode=mixed
+Type=notify
+
+# Only the main process should be killed, the namespace is automatically cleaned
+# up if that happens
+KillMode=process
 
 [Install]
 WantedBy=default.target
