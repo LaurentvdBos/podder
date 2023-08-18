@@ -211,23 +211,16 @@ class Layer:
         # TODO: do we want CLONE_NEWTIME and implement CLONE_NEWNET / CLONE_NEWUTS
         flags = linux.CLONE_NEWNS | linux.CLONE_NEWCGROUP | linux.CLONE_NEWIPC | linux.CLONE_NEWUSER | linux.CLONE_NEWPID
 
-        r, w = os.pipe()
         fd = os.eventfd(0)
         if (pid := os.fork()) == 0:
-            os.close(w)
-
             # Wait for the parent to unshare
             os.eventfd_read(fd)
-
             setup_uidgidmap(os.getppid())
-            
             os._exit(0)
-        else:
-            os.close(r)
 
         linux.unshare(flags)
 
-        # Signal child that we have unshared by closing the pipe
+        # Signal child that we have unshared
         os.eventfd_write(fd, 1)
         _, status = os.waitpid(pid, 0)
         if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
@@ -268,6 +261,15 @@ class Layer:
         else:
             # If it is only one layer, there is nothing to overlay
             linux.mount(overlay[0], os.path.join(self.path, "merged"), "ignored", linux.MS_BIND, None)
+
+        # Add bind mounts to configure network; we do this before the pivot root
+        # such that symlinks resolve correctly.
+        for what in ("/etc/hosts", "/etc/hostname", "/etc/resolv.conf"):
+            # Ensure the file exists
+            open(os.path.join(self.path, "merged", what[1:]), mode='w').close()
+
+            # Do the bind mount, resolving any symlinks the files may have
+            linux.mount(os.path.realpath(what), os.path.join(self.path, "merged", what[1:]), "ignored", linux.MS_BIND, None)
 
         os.mkdir(os.path.join(self.path, "merged", "old_root"))
         try:
@@ -321,7 +323,8 @@ class Layer:
 
                     # Catch SIGTERM and send it to the child
                     def sigterm(signum, frame):
-                        print("Terminating.", flush=True)
+                        signame = signal.Signals(signum).name
+                        print(f"Received {signame} ({signum}). Forwarding to {pid}...", file=sys.stderr)
                         os.kill(pid, signum)
                     
                     signal.signal(signal.SIGTERM, sigterm)
@@ -407,14 +410,6 @@ class Layer:
                     linux.mount("none", "/sys/fs/cgroup", "cgroup2", 0, None)
                 except PermissionError:
                     linux.mount("/old_root/sys", "/sys", "ignored", linux.MS_BIND | linux.MS_REC, None)
-
-                # Add bind mounts to configure network
-                for what in ("/etc/hosts", "/etc/hostname", "/etc/resolv.conf"):
-                    # Ensure the file exists
-                    open(what, mode='w').close()
-
-                    # Do the bind mount
-                    linux.mount(f"/old_root" + os.readlink(what) if os.path.islink(what) else what, what, "ignored", linux.MS_BIND, None)
             finally:
                 # Unmount the old root
                 linux.umount("/old_root", linux.MNT_DETACH)
