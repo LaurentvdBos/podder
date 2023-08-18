@@ -11,8 +11,6 @@ from podder.config import load_config, write_config
 import podder.linux as linux
 import termios
 
-from podder.sdnotify import sd_notify
-
 # The layerpath is $LAYERPATH, or $XDG_DATA_HOME/podder if that does not exist,
 # or ~/.local/share/podder if that one does not exist.
 LAYERPATH = os.getenv("LAYERPATH", os.path.join(os.getenv("XDG_DATA_HOME", os.path.expanduser("~/.local/share")), "podder"))
@@ -332,9 +330,6 @@ class Layer:
                     signal.signal(signal.SIGTERM, sigterm)
 
                     try:
-                        # Inform the service manager (if any) that we are ready
-                        sd_notify(f"READY=1\nMAINPID={pid}\n".encode())
-
                         if fd > -1:
                             tty.setraw(sys.stdin.fileno())
 

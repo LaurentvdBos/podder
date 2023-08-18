@@ -9,14 +9,14 @@
 #   loginctl enable-linger <username>
 
 [Unit]
-Description=Podder %I
+Description=Podder layer %I
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Restart=on-failure
 ExecStart=%h/.local/bin/podder start %I
-Type=notify
+Type=exec
 
 [Install]
 WantedBy=default.target
