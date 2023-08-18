@@ -1,9 +1,10 @@
 import argparse
 import sys
+from typing import NoReturn
 import podder.layer as layer
 import podder.registry as registry
 
-def pull(args):
+def pull(args) -> int:
     url = args.url
     if not '/' in url:
         lay = layer.Layer(url)
@@ -14,11 +15,11 @@ def pull(args):
     registry.pull(url)
     return 0
 
-def start(args):
+def start(args) -> NoReturn:
     lay = layer.Layer(args.layer)
     lay.start()
 
-def create(args):
+def create(args) -> int:
     lay = layer.Layer(args.layer, parent=layer.Layer(args.parent))
     lay.write()
     return 0
