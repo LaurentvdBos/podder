@@ -16,7 +16,6 @@ After=network-online.target
 [Service]
 Restart=on-failure
 ExecStart=%h/.local/bin/podder start %I
-Type=notify
 KillMode=mixed
 
 [Install]
