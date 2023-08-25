@@ -49,18 +49,29 @@ MS_I_VERSION = (1<<23)       # Update inode I_version field
 MS_STRICTATIME = (1<<24)     # Always perform atime updates
 MS_LAZYTIME = (1<<25)        # Update the on-disk [acm]times lazily
 
-if platform.machine() == "aarch64":
-    __NR_UMOUNT2 = 39
-    __NR_MOUNT = 40
-    __NR_PIVOTROOT = 41
-    __NR_UNSHARE = 97
-    __NR_SETHOSTNAME = 161
-    __NR_SETDOMAINNAME = 162
-    ARCH = "arm64"
-    OS = "linux"
-    VARIANT = "v8"
-else:
-    raise NotImplementedError("Platform %s not supported" % platform.machine())
+match platform.machine():
+    case "aarch64":
+        __NR_UMOUNT2 = 39
+        __NR_MOUNT = 40
+        __NR_PIVOTROOT = 41
+        __NR_UNSHARE = 97
+        __NR_SETHOSTNAME = 161
+        __NR_SETDOMAINNAME = 162
+        ARCH = "arm64"
+        OS = "linux"
+        VARIANT = "v8"
+    case "x86_64":
+        __NR_UMOUNT2 = 166
+        __NR_MOUNT = 165
+        __NR_PIVOTROOT = 155
+        __NR_UNSHARE = 272
+        __NR_SETHOSTNAME = 170
+        __NR_SETDOMAINNAME = 171
+        ARCH = "amd64"
+        OS = "linux"
+        VARIANT = ""
+    case _:
+        raise NotImplementedError("Platform %s not supported" % platform.machine())
 
 libc = ctypes.CDLL(None, use_errno=True)
 _syscall = libc.syscall
