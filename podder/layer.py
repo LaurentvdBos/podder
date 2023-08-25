@@ -35,11 +35,18 @@ def setup_uidgidmap(pid: int):
             uidorname, subgid, subgidcount = line.split(":")
             if uidorname == user[0] or uidorname == str(uid):
                 retgid = os.system(f"newgidmap {pid} 0 {gid} 1 1 {subgid} {subgidcount}")
+                break
 
     if retuid != 0:
         # newuidmap failed, set it up ourselves
+
+        # root user can make arbitrary maps, so make the largest identity map
+        # possible if uid == 0.
+        # TODO: does this work in namespaces where not all uids are present?  If
+        # not, maybe we need to parse /proc/self/uid_map
+
         f = os.open(f"/proc/{pid}/uid_map", os.O_WRONLY)
-        os.write(f, ("%8u %8u %8u\n" % (0, uid, 1)).encode())
+        os.write(f, ("%8u %8u %8u\n" % (0, uid, 1 if uid > 0 else 4294967295)).encode())
         os.close(f)
 
     if retgid != 0:
@@ -49,7 +56,7 @@ def setup_uidgidmap(pid: int):
         os.close(f)
 
         f = os.open(f"/proc/{pid}/gid_map", os.O_WRONLY)
-        os.write(f, ("%8u %8u %8u\n" % (0, gid, 1)).encode())
+        os.write(f, ("%8u %8u %8u\n" % (0, gid, 1 if uid > 0 else 4294967295)).encode())
         os.close(f)
 
 class Layer:
