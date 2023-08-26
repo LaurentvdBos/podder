@@ -86,7 +86,6 @@ def forktochild(pidfile: Optional[str] = None, *, dir_fd: Optional[int] = None):
 
         # Catch SIGTERM and send it to the child
         def sigterm(signum, frame):
-            signame = signal.Signals(signum).name
             os.kill(pid, signum)
 
         signal.signal(signal.SIGTERM, sigterm)
