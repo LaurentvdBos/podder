@@ -68,6 +68,8 @@ be added:
 - Document the structure of `config.ini` and the integration in systemd.
 - Parse `/etc/subuid` and `/etc/subgid` correctly, since one user can have
   multiple entries.
+- Bind mounts, i.e., mounting directories and files in the layer when it is
+  started.
 
 I do not want to use any packages besides the standard Python library and I am
 not interested in developing Podder beyond just "executing containers" (i.e., it
