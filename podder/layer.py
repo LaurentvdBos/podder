@@ -205,7 +205,7 @@ class Layer:
     def start(self) -> NoReturn:
         # Before doing anything, see whether location exists and there is no pidfile
         if not os.path.exists(self.path):
-            raise FileNotFoundError(f"{self.path}")
+            raise FileNotFoundError(self.path)
         if os.path.exists(self.pidfile):
             # Check whether the layer is running, and if it does, do not continue
             with open(self.pidfile, mode='r') as f:
@@ -216,7 +216,7 @@ class Layer:
                     print(f"Could not find process with pid {pid}; did the layer crash?", file=sys.stderr)
                     os.remove(self.pidfile)
                 else:
-                    raise FileExistsError(f"{self.pidfile}")
+                    raise FileExistsError(self.pidfile)
 
         # TODO: do we want CLONE_NEWTIME and implement CLONE_NEWNET / CLONE_NEWUTS
         flags = linux.CLONE_NEWNS | linux.CLONE_NEWCGROUP | linux.CLONE_NEWIPC | linux.CLONE_NEWUSER | linux.CLONE_NEWPID
@@ -427,3 +427,32 @@ class Layer:
             os.rmdir(f"/old_root")
         
         os.execvpe(self.cmd[0], self.cmd, self.env)
+    
+    def exec(self, cmd: List[str]) -> NoReturn:
+        # Before doing anything, see whether location exists and that there is a pidfile
+        if not os.path.exists(self.path):
+            raise FileNotFoundError(self.path)
+        if not os.path.exists(self.pidfile):
+            raise FileNotFoundError(self.pidfile)
+        
+        with open(self.pidfile, 'r') as f:
+            pid = int(f.read())
+        
+        flags = linux.CLONE_NEWNS | linux.CLONE_NEWCGROUP | linux.CLONE_NEWIPC | linux.CLONE_NEWUSER | linux.CLONE_NEWPID
+
+        fd = os.pidfd_open(pid)
+        linux.setns(fd, flags)
+        os.close(fd)
+
+        if (pid := os.fork()) > 0:
+            # This is the parent, wait for the child to exit
+            _, status = os.waitpid(pid, 0)
+
+            if os.WIFEXITED(status):
+                # Exit with the same status code as init did
+                os._exit(os.WEXITSTATUS(status))
+            if os.WIFSIGNALED(status):
+                # Exit with 128 + the signal number, a convention used by bash
+                os._exit(128 + os.WTERMSIG(status))
+
+        os.execvpe(cmd[0], cmd, self.env)

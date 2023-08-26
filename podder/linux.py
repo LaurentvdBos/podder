@@ -57,6 +57,7 @@ match platform.machine():
         __NR_UNSHARE = 97
         __NR_SETHOSTNAME = 161
         __NR_SETDOMAINNAME = 162
+        __NR_SETNS = 268
         ARCH = "arm64"
         OS = "linux"
         VARIANT = "v8"
@@ -67,6 +68,7 @@ match platform.machine():
         __NR_UNSHARE = 272
         __NR_SETHOSTNAME = 170
         __NR_SETDOMAINNAME = 171
+        __NR_SETNS = 308
         ARCH = "amd64"
         OS = "linux"
         VARIANT = ""
@@ -140,3 +142,12 @@ def setdomainname(name: str):
     return syscall(__NR_SETDOMAINNAME,
                    ctypes.c_char_p(name.encode()),
                    ctypes.c_int(len(name)))
+
+def setns(fd: int, nstype: int):
+    """Reassociate thread with an existing namespace. Here, `fd` is either a
+    file descriptor referring to something in `/proc/<pid>/ns/` or to a
+    PID file descriptor."""
+
+    return syscall(__NR_SETNS,
+                   ctypes.c_int(fd),
+                   ctypes.c_int(nstype))

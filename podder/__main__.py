@@ -24,6 +24,10 @@ def create(args) -> int:
     lay.write()
     return 0
 
+def exec(args) -> NoReturn:
+    lay = layer.Layer(args.layer)
+    lay.exec(args.cmd)
+
 def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--layerpath', help="""Path where the layers are stored.
@@ -46,6 +50,11 @@ def main():
     parser_create.add_argument("layer", help="layer name")
     parser_create.add_argument("--parent", help="parent layer, if any")
     parser_create.set_defaults(func=create)
+
+    parser_exec = subparsers.add_parser("exec", help="execute in existing layer")
+    parser_exec.add_argument("layer", help="layer name")
+    parser_exec.add_argument("cmd", nargs=argparse.REMAINDER, help="command to be executed")
+    parser_exec.set_defaults(func=exec)
 
     args = parser.parse_args()
 
