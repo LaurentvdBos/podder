@@ -62,6 +62,109 @@ def setup_uidgidmap(pid: int):
         os.write(f, ("%8u %8u %8u\n" % (0, gid, 1 if uid != 0 else 4294967295)).encode())
         os.close(f)
 
+def forktochild(pidfile: Optional[str] = None, *, dir_fd: Optional[int] = None):
+    """Fork and only return from the child. The parent waits for the child to
+    exit and never returns, not even when an exception happens. If we are
+    attached to a TTY, a pseudo-TTY is made for the child, so /dev/pts should be
+    mounted in that case. If SIGTERM is sent to the parent, this signal is
+    forwarded to the child."""
+
+    if os.isatty(sys.stdin.fileno()):
+        attr = termios.tcgetattr(sys.stdin.fileno())
+        pid, fd = os.forkpty()
+    else:
+        pid = os.fork()
+        fd = -1
+    if pid > 0:
+        exit_code = 1
+
+        if pidfile is not None:
+            # Create a pid file
+            f = os.open(os.path.basename(pidfile), os.O_CREAT | os.O_WRONLY, dir_fd=dir_fd)
+            os.write(f, f"{pid}\n".encode())
+            os.close(f)
+
+        # Catch SIGTERM and send it to the child
+        def sigterm(signum, frame):
+            signame = signal.Signals(signum).name
+            os.kill(pid, signum)
+
+        signal.signal(signal.SIGTERM, sigterm)
+
+        try:
+            if fd > -1:
+                tty.setraw(sys.stdin.fileno())
+
+                def sigwinch(signum, frame):
+                    winsz = ioctl(sys.stdin.fileno(), termios.TIOCGWINSZ, b" " * 1024)
+                    ioctl(fd, termios.TIOCSWINSZ, winsz)
+
+                signal.signal(signal.SIGWINCH, sigwinch)
+                signal.raise_signal(signal.SIGWINCH)
+
+                stdin = b""
+                stdout = b""
+                while True:
+                    rlist = []
+                    wlist = []
+                    if stdin:
+                        wlist += [fd]
+                    else:
+                        rlist += [sys.stdin.fileno()]
+                    if stdout:
+                        wlist += [sys.stdout.fileno()]
+                    else:
+                        rlist += [fd]
+
+                    rlist, wlist, _ = select(rlist, wlist, [])
+
+                    if sys.stdin.fileno() in rlist:
+                        stdin = os.read(sys.stdin.fileno(), 1024)
+                        if not stdin:
+                            os.close(fd)
+                    
+                    if fd in rlist:
+                        try:
+                            stdout = os.read(fd, 1024)
+                        except OSError:
+                            stdout = b""
+                        if not stdout:
+                            break
+                    
+                    if sys.stdout.fileno() in wlist:
+                        n = os.write(sys.stdout.fileno(), stdout)
+                        stdout = stdout[n:]
+                    
+                    if fd in wlist:
+                        n = os.write(fd, stdin)
+                        stdin = stdin[n:]
+
+            _, status = os.waitpid(pid, 0)
+
+            if os.WIFEXITED(status):
+                # Exit with the same status code as init did
+                exit_code = os.WEXITSTATUS(status)
+            if os.WIFSIGNALED(status):
+                # Exit with 128 + the signal number, a convention used by bash
+                exit_code = 128 + os.WTERMSIG(status)
+        finally:
+            # Restore the terminal to its original state; this will
+            # send SIGTTOU since this is a background process, which
+            # we ignore.
+            if fd > -1:
+                signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, attr)
+
+            if pidfile is not None:
+                # Remove the pid file
+                os.remove(os.path.basename(pidfile), dir_fd=dir_fd)
+
+            # Exit the Python process
+            sys.stdout.flush()
+            os._exit(exit_code)
+    elif dir_fd is not None:
+        os.close(dir_fd)
+
 class Layer:
     path: str
     parent: Optional["Layer"]
@@ -311,105 +414,12 @@ class Layer:
                 linux.mount("none", "/dev/pts", "devpts", 0, "newinstance,mode=620,ptmxmode=666,gid=5")
                 os.symlink("pts/ptmx", "/dev/ptmx")
 
-                # With a (potential) pseudotty in place, fork to create a process with PID 1.
+                forktochild(self.pidfile, dir_fd=dir_fd)
+
                 if os.isatty(sys.stdin.fileno()):
-                    attr = termios.tcgetattr(sys.stdin.fileno())
-                    pid, fd = os.forkpty()
-
-                    if pid == 0:
-                        # Create /dev/console pointing to the pseudo tty
-                        open("/dev/console", mode='w').close()
-                        linux.mount(os.ttyname(sys.stdin.fileno()), "/dev/console", "ignored", linux.MS_BIND, None)
-                else:
-                    pid = os.fork()
-                    fd = -1
-                if pid > 0:
-                    exit_code = 1
-
-                    # Create a pid file
-                    f = os.open("init.pid", os.O_CREAT | os.O_WRONLY, dir_fd=dir_fd)
-                    os.write(f, f"{pid}\n".encode())
-                    os.close(f)
-
-                    # Catch SIGTERM and send it to the child
-                    def sigterm(signum, frame):
-                        signame = signal.Signals(signum).name
-                        os.kill(pid, signum)
-
-                    signal.signal(signal.SIGTERM, sigterm)
-
-                    try:
-                        if fd > -1:
-                            tty.setraw(sys.stdin.fileno())
-
-                            def sigwinch(signum, frame):
-                                winsz = ioctl(sys.stdin.fileno(), termios.TIOCGWINSZ, b" " * 1024)
-                                ioctl(fd, termios.TIOCSWINSZ, winsz)
-
-                            signal.signal(signal.SIGWINCH, sigwinch)
-                            signal.raise_signal(signal.SIGWINCH)
-
-                            stdin = b""
-                            stdout = b""
-                            while True:
-                                rlist = []
-                                wlist = []
-                                if stdin:
-                                    wlist += [fd]
-                                else:
-                                    rlist += [sys.stdin.fileno()]
-                                if stdout:
-                                    wlist += [sys.stdout.fileno()]
-                                else:
-                                    rlist += [fd]
-
-                                rlist, wlist, _ = select(rlist, wlist, [])
-
-                                if sys.stdin.fileno() in rlist:
-                                    stdin = os.read(sys.stdin.fileno(), 1024)
-                                    if not stdin:
-                                        os.close(fd)
-                                
-                                if fd in rlist:
-                                    try:
-                                        stdout = os.read(fd, 1024)
-                                    except OSError:
-                                        stdout = b""
-                                    if not stdout:
-                                        break
-                                
-                                if sys.stdout.fileno() in wlist:
-                                    n = os.write(sys.stdout.fileno(), stdout)
-                                    stdout = stdout[n:]
-                                
-                                if fd in wlist:
-                                    n = os.write(fd, stdin)
-                                    stdin = stdin[n:]
-
-                        _, status = os.waitpid(pid, 0)
-
-                        if os.WIFEXITED(status):
-                            # Exit with the same status code as init did
-                            exit_code = os.WEXITSTATUS(status)
-                        if os.WIFSIGNALED(status):
-                            # Exit with 128 + the signal number, a convention used by bash
-                            exit_code = 128 + os.WTERMSIG(status)
-                    finally:
-                        # Restore the terminal to its original state; this will
-                        # send SIGTTOU since this is a background process, which
-                        # we ignore.
-                        if fd > -1:
-                            signal.signal(signal.SIGTTOU, signal.SIG_IGN)
-                            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, attr)
-
-                        # Remove the pid file
-                        os.remove("init.pid", dir_fd=dir_fd)
-
-                        # Exit the Python process
-                        sys.stdout.flush()
-                        os._exit(exit_code)
-                else:
-                    os.close(dir_fd)
+                    # Create /dev/console pointing to the pseudo tty
+                    open("/dev/console", mode='w').close()
+                    linux.mount(os.ttyname(sys.stdin.fileno()), "/dev/console", "ignored", linux.MS_BIND, None)
 
                 # We are now pid 1, so mount /proc and /sys
                 linux.mount("none", "/proc", "proc",  linux.MS_NODEV | linux.MS_NOSUID | linux.MS_NOEXEC, None)
@@ -444,15 +454,6 @@ class Layer:
         linux.setns(fd, flags)
         os.close(fd)
 
-        if (pid := os.fork()) > 0:
-            # This is the parent, wait for the child to exit
-            _, status = os.waitpid(pid, 0)
-
-            if os.WIFEXITED(status):
-                # Exit with the same status code as init did
-                os._exit(os.WEXITSTATUS(status))
-            if os.WIFSIGNALED(status):
-                # Exit with 128 + the signal number, a convention used by bash
-                os._exit(128 + os.WTERMSIG(status))
+        forktochild()
 
         os.execvpe(cmd[0], cmd, self.env)
