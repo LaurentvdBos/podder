@@ -80,7 +80,7 @@ def forktochild(pidfile: Optional[str] = None, *, dir_fd: Optional[int] = None):
 
         if pidfile is not None:
             # Create a pid file
-            f = os.open(os.path.basename(pidfile), os.O_CREAT | os.O_WRONLY, dir_fd=dir_fd)
+            f = os.open(pidfile, os.O_CREAT | os.O_WRONLY, dir_fd=dir_fd)
             os.write(f, f"{pid}\n".encode())
             os.close(f)
 
@@ -156,13 +156,11 @@ def forktochild(pidfile: Optional[str] = None, *, dir_fd: Optional[int] = None):
 
             if pidfile is not None:
                 # Remove the pid file
-                os.remove(os.path.basename(pidfile), dir_fd=dir_fd)
+                os.remove(pidfile, dir_fd=dir_fd)
 
             # Exit the Python process
             sys.stdout.flush()
             os._exit(exit_code)
-    elif dir_fd is not None:
-        os.close(dir_fd)
 
 class Layer:
     path: str
@@ -413,7 +411,7 @@ class Layer:
                 linux.mount("none", "/dev/pts", "devpts", 0, "newinstance,mode=620,ptmxmode=666,gid=5")
                 os.symlink("pts/ptmx", "/dev/ptmx")
 
-                forktochild(self.pidfile, dir_fd=dir_fd)
+                forktochild(os.path.basename(self.pidfile), dir_fd=dir_fd)
 
                 if os.isatty(sys.stdin.fileno()):
                     # Create /dev/console pointing to the pseudo tty
@@ -435,6 +433,9 @@ class Layer:
             # Remove the old root directory
             os.rmdir(f"/old_root")
         
+        # Close the file pointer to the layer
+        os.close(dir_fd)
+
         os.execvpe(self.cmd[0], self.cmd, self.env)
     
     def exec(self, cmd: List[str]) -> NoReturn:
