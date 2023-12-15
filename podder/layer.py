@@ -391,12 +391,13 @@ class Layer:
 
         # Add bind mounts to configure network; we do this before the pivot root
         # such that symlinks resolve correctly.
-        for what in ("/etc/hosts", "/etc/hostname", "/etc/resolv.conf"):
-            # Ensure the file exists
-            open(os.path.join(self.path, "merged", what[1:]), mode='w').close()
+        if self.ifname is not None:
+            for what in ("/etc/hosts", "/etc/hostname", "/etc/resolv.conf"):
+                # Ensure the file exists
+                open(os.path.join(self.path, "merged", what[1:]), mode='w').close()
 
-            # Do the bind mount, resolving any symlinks the files may have
-            linux.mount(os.path.realpath(what), os.path.join(self.path, "merged", what[1:]), "ignored", linux.MS_BIND, None)
+                # Do the bind mount, resolving any symlinks the files may have
+                linux.mount(os.path.realpath(what), os.path.join(self.path, "merged", what[1:]), "ignored", linux.MS_BIND, None)
 
         os.mkdir(os.path.join(self.path, "merged", "old_root"))
         try:
