@@ -236,6 +236,22 @@ class Layer:
     @url.setter
     def url(self, value: str):
         self.config["url"] = str(value)
+
+    @property
+    def mac(self) -> str:
+        return self["mac"]
+
+    @mac.setter
+    def mac(self, value: str):
+        self.config["mac"] = str(value)
+
+    @property
+    def ifname(self) -> str:
+        return self["ifname"]
+
+    @ifname.setter
+    def ifname(self, value: str):
+        self.config["ifname"] = str(value)
     
     @property
     def pidfile(self) -> str:
@@ -318,8 +334,9 @@ class Layer:
                 else:
                     raise FileExistsError(self.pidfile)
 
-        # TODO: do we want CLONE_NEWTIME and implement CLONE_NEWNET / CLONE_NEWUTS
         flags = linux.CLONE_NEWNS | linux.CLONE_NEWCGROUP | linux.CLONE_NEWIPC | linux.CLONE_NEWUSER | linux.CLONE_NEWPID
+        if self.ifname is not None:
+            flags |= linux.CLONE_NEWNET | linux.CLONE_NEWUTS
 
         fd = os.eventfd(0)
         if (pid := os.fork()) == 0:

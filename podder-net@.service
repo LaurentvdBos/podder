@@ -1,0 +1,11 @@
+[Unit]
+Description=Podder networking for %I
+Wants=network-online.target
+After=network-online.target podder@%I.service
+
+[Service]
+Restart=on-failure
+ExecStart=%h/.local/bin/podder network %I
+
+[Install]
+WantedBy=default.target

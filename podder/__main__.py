@@ -28,6 +28,46 @@ def exec(args) -> NoReturn:
     lay = layer.Layer(args.layer)
     lay.exec(args.cmd)
 
+def network(args) -> int | NoReturn:
+    lay = layer.Layer(args.layer)
+    if lay.ifname is not None:
+        import os
+        import time
+        import podder.linux as linux
+
+        # FIXME: wait for the container to appear
+        time.sleep(1)
+
+        # Read the pidfile
+        with open(lay.pidfile, 'r') as f:
+            pid = int(f.read())
+
+        if lay.mac is None:
+            os.system(f"./podder-net {lay.ifname} {str(pid)}")
+        else:
+            os.system(f"./podder-net {lay.ifname} {str(pid)} {lay.mac}")
+        
+        if os.fork() == 0:
+            # Join the network namespace (and also the user namespace to gain root and pid namespace to get killed automatically)
+            flags = linux.CLONE_NEWNET | linux.CLONE_NEWUSER | linux.CLONE_NEWPID
+
+            fd = os.pidfd_open(pid)
+            linux.setns(fd, flags)
+            os.close(fd)
+
+            # Bring lo up
+            os.system("ip link set lo up")
+
+            # Start DHCP
+            os.execv("/usr/sbin/dhclient", ["-d", "-v", "-lf", "/dev/null", "macvlan0"])
+        else:
+            # Child stops automatically when pid namespace disappears
+            os.wait()
+            return 0
+    else:
+        print("No interface specified; nothing to do.")
+        return 0
+
 def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--layerpath', help="""Path where the layers are stored.
@@ -55,6 +95,10 @@ def main():
     parser_exec.add_argument("layer", help="layer name")
     parser_exec.add_argument("cmd", nargs=argparse.REMAINDER, help="command to be executed")
     parser_exec.set_defaults(func=exec)
+
+    parser_network = subparsers.add_parser("network", help="initialize network for existing layer")
+    parser_network.add_argument("layer", help="layer name")
+    parser_network.set_defaults(func=network)
 
     args = parser.parse_args()
 
