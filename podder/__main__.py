@@ -61,7 +61,7 @@ def network(args) -> int | NoReturn:
         os.system("ip link set macvlan0 up")
 
         # Start DHCP (NB: this assumes dhclient to be present in the container)
-        os.execv("/usr/sbin/dhclient", ["-d", "-v", "macvlan0"])
+        os.execv("/sbin/dhclient", ["-d", "-v", "macvlan0"])
     else:
         print("No interface specified; nothing to do.")
         return 0
