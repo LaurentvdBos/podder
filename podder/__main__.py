@@ -60,7 +60,7 @@ def network(args) -> int | NoReturn:
             os.system("ip link set macvlan0 up")
 
             # Start DHCP
-            os.execv("/usr/sbin/dhclient", ["-d", "-v", "-lf", "/run/dhclient.lease", "-sf", "/usr/bin/true", "-pf", "/run/dhclient.pid", "macvlan0"])
+            os.execv("/usr/sbin/dhclient", ["-d", "-v", "-lf", os.path.join(os.getenv("XDG_RUNTIME_DIR", "/tmp"), "dhclient.lease"), "-sf", "/usr/bin/true", "-pf", os.path.join(os.getenv("XDG_RUNTIME_DIR", "/tmp"), "dhclient.pid"), "macvlan0"])
         else:
             # Child stops automatically when pid namespace disappears
             os.wait()
