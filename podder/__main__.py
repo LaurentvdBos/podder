@@ -55,8 +55,9 @@ def network(args) -> int | NoReturn:
             linux.setns(fd, flags)
             os.close(fd)
 
-            # Bring lo up
+            # Bring lo and macvlan0 up
             os.system("ip link set lo up")
+            os.system("ip link set macvlan0 up")
 
             # Start DHCP
             os.execv("/usr/sbin/dhclient", ["-d", "-v", "-lf", "/dev/null", "-sf", "/usr/bin/true", "-pf", "/dev/null", "macvlan0"])
