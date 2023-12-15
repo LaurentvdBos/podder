@@ -391,7 +391,7 @@ class Layer:
 
         # Add bind mounts to configure network; we do this before the pivot root
         # such that symlinks resolve correctly.
-        if self.ifname is not None:
+        if self.ifname is None:
             for what in ("/etc/hosts", "/etc/hostname", "/etc/resolv.conf"):
                 # Ensure the file exists
                 open(os.path.join(self.path, "merged", what[1:]), mode='w').close()
