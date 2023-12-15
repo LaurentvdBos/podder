@@ -61,7 +61,7 @@ def network(args) -> int | NoReturn:
         os.system("ip link set macvlan0 up")
 
         # Start DHCP
-        os.execv("/usr/sbin/dhclient", ["-d", "-v", "-lf", "/dev/null", "-sf", "/usr/bin/true", "--no-pid", "macvlan0"])
+        os.execv("/usr/sbin/dhclient", ["-d", "-v", "-lf", "/dev/null", "--no-pid", "macvlan0"])
     else:
         print("No interface specified; nothing to do.")
         return 0
