@@ -46,9 +46,11 @@ def network(args) -> int | NoReturn:
             os.system(f"~/.local/bin/podder-net {lay.ifname} {str(pid)}")
         else:
             os.system(f"~/.local/bin/podder-net {lay.ifname} {str(pid)} {lay.mac}")
-        
+
+        dir_fd = os.open("/usr/sbin", os.O_RDONLY | os.O_DIRECTORY)
+
         # Join the network namespace (and also the user namespace to gain root and pid namespace to get killed automatically)
-        flags = linux.CLONE_NEWCGROUP | linux.CLONE_NEWIPC | linux.CLONE_NEWUSER | linux.CLONE_NEWPID | linux.CLONE_NEWNET | linux.CLONE_NEWUTS
+        flags = linux.CLONE_NEWNS | linux.CLONE_NEWCGROUP | linux.CLONE_NEWIPC | linux.CLONE_NEWUSER | linux.CLONE_NEWPID | linux.CLONE_NEWNET | linux.CLONE_NEWUTS
 
         fd = os.pidfd_open(pid)
         linux.setns(fd, flags)
@@ -61,7 +63,7 @@ def network(args) -> int | NoReturn:
         os.system("ip link set macvlan0 up")
 
         # Start DHCP
-        os.execv("/usr/sbin/dhclient", ["-d", "-v", "-lf", "/dev/null", "--no-pid", "macvlan0"])
+        linux.execveat(dir_fd, "dhclient", ["-d", "-v", "--no-pid", "macvlan0"], [], 0)
     else:
         print("No interface specified; nothing to do.")
         return 0

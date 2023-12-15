@@ -8,7 +8,7 @@ almost all of them do).
 import ctypes
 import os
 import platform
-from typing import Optional
+from typing import List, Optional
 
 CLONE_NEWNS = 0x00020000     # New mount namespace group
 CLONE_NEWCGROUP = 0x02000000 # New cgroup namespace
@@ -58,6 +58,7 @@ match platform.machine():
         __NR_SETHOSTNAME = 161
         __NR_SETDOMAINNAME = 162
         __NR_SETNS = 268
+        __NR_EXECVEAT = 281
         ARCH = "arm64"
         OS = "linux"
         VARIANT = "v8"
@@ -69,6 +70,7 @@ match platform.machine():
         __NR_SETHOSTNAME = 170
         __NR_SETDOMAINNAME = 171
         __NR_SETNS = 308
+        __NR_EXECVEAT = 322
         ARCH = "amd64"
         OS = "linux"
         VARIANT = ""
@@ -151,3 +153,22 @@ def setns(fd: int, nstype: int):
     return syscall(__NR_SETNS,
                    ctypes.c_int(fd),
                    ctypes.c_int(nstype))
+
+def execveat(dirfd: int, pathname: str, argv: List[str], envp: List[str], flags: int = 0):
+    """Execute program relative to a directory file descriptor"""
+
+    # Add the final NULL to the arrays before passing it to C
+    argv_c = (ctypes.c_char_p * (len(argv) + 1))()
+    argv_c[:-1] = [e.encode() for e in argv]
+    argv_c[len(argv)] = None
+
+    envp_c = (ctypes.c_char_p * (len(envp) + 1))()
+    envp_c[:-1] = [e.encode() for e in envp]
+    envp_c[len(envp)] = None
+
+    return syscall(__NR_EXECVEAT,
+                   ctypes.c_int(dirfd),
+                   ctypes.c_char_p(pathname.encode()),
+                   argv_c,
+                   envp_c,
+                   flags)
