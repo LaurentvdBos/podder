@@ -465,7 +465,7 @@ class Layer:
         with open(self.pidfile, 'r') as f:
             pid = int(f.read())
         
-        flags = linux.CLONE_NEWNS | linux.CLONE_NEWCGROUP | linux.CLONE_NEWIPC | linux.CLONE_NEWUSER | linux.CLONE_NEWPID
+        flags = linux.CLONE_NEWNS | linux.CLONE_NEWCGROUP | linux.CLONE_NEWIPC | linux.CLONE_NEWUSER | linux.CLONE_NEWPID | linux.CLONE_NEWNET | linux.CLONE_NEWUTS
 
         fd = os.pidfd_open(pid)
         linux.setns(fd, flags)

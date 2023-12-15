@@ -43,9 +43,9 @@ def network(args) -> int | NoReturn:
             pid = int(f.read())
 
         if lay.mac is None:
-            os.system(f"./podder-net {lay.ifname} {str(pid)}")
+            os.system(f"~/.local/bin/podder-net {lay.ifname} {str(pid)}")
         else:
-            os.system(f"./podder-net {lay.ifname} {str(pid)} {lay.mac}")
+            os.system(f"~/.local/bin/podder-net {lay.ifname} {str(pid)} {lay.mac}")
         
         if os.fork() == 0:
             # Join the network namespace (and also the user namespace to gain root and pid namespace to get killed automatically)

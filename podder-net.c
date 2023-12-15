@@ -36,9 +36,9 @@ int main(int argc, char **argv)
     if (argc < 3) {
         fprintf(stderr, "Usage: %s <interface> <pid> <mac>\n\n", argv[0]);
         fprintf(stderr, "Here:\n");
-        fprintf(stderr, "- interface: the interface to use for the macvlan.");
-        fprintf(stderr, "- pid: process in the namespace where the macvlan will be put.");
-        fprintf(stderr, "- mac: mac address of the macvlan in lower case (optional; random if not provied).");
+        fprintf(stderr, "- interface: the interface to use for the macvlan.\n");
+        fprintf(stderr, "- pid: process in the namespace where the macvlan will be put.\n");
+        fprintf(stderr, "- mac: mac address of the macvlan in lower case (optional; random if not provied).\n");
         return -1;
     }
 

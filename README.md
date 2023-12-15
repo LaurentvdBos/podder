@@ -61,8 +61,6 @@ layer, except for keys overwritten in `config.ini`.
 Besides the usual code quality improvements, the followings aspects are still to
 be added:
 - Executing a command in a running layer
-- Network support for unprivileged containers via a binary with sufficient
-  capabilities
 - Make all commands self-explanitory, i.e., running `podder start --help` gives
   extensive documentation about how `podder start` should be used.
 - Document the structure of `config.ini` and the integration in systemd.
