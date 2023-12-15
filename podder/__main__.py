@@ -48,23 +48,20 @@ def network(args) -> int | NoReturn:
             os.system(f"~/.local/bin/podder-net {lay.ifname} {str(pid)} {lay.mac}")
         
         # Join the network namespace (and also the user namespace to gain root and pid namespace to get killed automatically)
-        flags = linux.CLONE_NEWNET | linux.CLONE_NEWUSER | linux.CLONE_NEWPID
+        flags = linux.CLONE_NEWCGROUP | linux.CLONE_NEWIPC | linux.CLONE_NEWUSER | linux.CLONE_NEWPID | linux.CLONE_NEWNET | linux.CLONE_NEWUTS
 
         fd = os.pidfd_open(pid)
         linux.setns(fd, flags)
         os.close(fd)
 
-        if os.fork() == 0:
-            # Bring lo and macvlan0 up
-            os.system("ip link set lo up")
-            os.system("ip link set macvlan0 up")
+        layer.forktochild()
 
-            # Start DHCP
-            os.execv("/usr/sbin/dhclient", ["-d", "-v", "-lf", os.path.join(os.getenv("XDG_RUNTIME_DIR", "/tmp"), "dhclient.lease"), "-sf", "/usr/bin/true", "-pf", os.path.join(os.getenv("XDG_RUNTIME_DIR", "/tmp"), "dhclient.pid"), "macvlan0"])
-        else:
-            # Child stops automatically when pid namespace disappears
-            os.wait()
-            return 0
+        # Bring lo and macvlan0 up
+        os.system("ip link set lo up")
+        os.system("ip link set macvlan0 up")
+
+        # Start DHCP
+        os.execv("/usr/sbin/dhclient", ["-d", "-v", "-lf", os.path.join(os.getenv("XDG_RUNTIME_DIR", "/tmp"), "dhclient.lease"), "-sf", "/usr/bin/true", "-pf", os.path.join(os.getenv("XDG_RUNTIME_DIR", "/tmp"), "dhclient.pid"), "macvlan0"])
     else:
         print("No interface specified; nothing to do.")
         return 0
